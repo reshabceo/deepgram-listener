@@ -47,6 +47,8 @@ app.ws('/listen', (ws, req) => {
   ws.on('message', async (data) => {
     try {
       const parsed = JSON.parse(data.toString());
+      console.log('📦 Raw Deepgram Message:', parsed); // 🧪 Log entire payload for debugging
+
       if (parsed.channel && parsed.channel.alternatives) {
         const transcript = parsed.channel.alternatives[0].transcript;
         if (transcript) {
