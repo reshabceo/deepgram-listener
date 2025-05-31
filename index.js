@@ -56,10 +56,17 @@ app.ws('/listen', (ws, req) => {
 
           const n8n_webhook_url = "https://bms123.app.n8n.cloud/webhook/deepgram-transcript";
 
-          await axios.post(n8n_webhook_url, {
-            transcript,
-            timestamp: new Date().toISOString()
-          });
+         console.log('📤 Sending to n8n webhook:', {
+  url: n8n_webhook_url,
+  transcript: transcript,
+  timestamp: new Date().toISOString()
+});
+
+await axios.post(n8n_webhook_url, {
+  transcript,
+  timestamp: new Date().toISOString()
+});
+
         }
       }
     } catch (err) {
