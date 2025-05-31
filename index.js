@@ -1,34 +1,35 @@
 const express = require('express');
+const expressWs = require('express-ws');
 const WebSocket = require('ws');
 const axios = require('axios');
 
 const app = express();
+expressWs(app); // ⬅️ this attaches WebSocket support to Express
+
 const port = process.env.PORT || 3000;
 
-const server = app.listen(port, () => {
+app.listen(port, () => {
   console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
 });
 
-const wss = new WebSocket.Server({ server });
+app.ws('/listen', (ws, req) => {
+  console.log('🔗 WebSocket /listen connected');
 
-wss.on('connection', function connection(ws) {
-  console.log('🔗 WebSocket connected');
-
-  ws.on('message', async function incoming(data) {
+  ws.on('message', async (data) => {
     try {
       const parsed = JSON.parse(data.toString());
 
       if (parsed.channel && parsed.channel.alternatives) {
         const transcript = parsed.channel.alternatives[0].transcript;
         if (transcript) {
-          console.log(`📝 Transcript: ${transcript}`);
+          console.log(`💬 Transcript: ${transcript}`);
 
           // Send to n8n
           const n8n_webhook_url = "https://bms123.app.n8n.cloud/webhook/deepgram-transcript";
 
           await axios.post(n8n_webhook_url, {
             transcript: transcript,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
           });
         }
       }
@@ -38,9 +39,9 @@ wss.on('connection', function connection(ws) {
   });
 
   ws.on('close', () => {
-    console.log('❌ WebSocket disconnected');
+    console.log('❌ WebSocket /listen disconnected');
   });
 });
 
-// Keep alive
+// 🔁 Prevent Railway from shutting down due to idling
 setInterval(() => {}, 1000);
