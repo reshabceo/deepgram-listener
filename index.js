@@ -8,9 +8,14 @@ expressWs(app); // ⬅️ this attaches WebSocket support to Express
 
 const port = process.env.PORT || 3000;
 
+app.get('/', (req, res) => {
+  res.send('✅ Deepgram listener is running');
+});
+
 app.listen(port, () => {
   console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
 });
+
 
 app.ws('/listen', (ws, req) => {
   console.log('🔗 WebSocket /listen connected');
