@@ -4,16 +4,16 @@ const WebSocket = require('ws');
 const axios = require('axios');
 
 const app = express();
-expressWs(app); // enable WebSocket on Express
+expressWs(app);
 
 const port = process.env.PORT || 3000;
 
-// ✅ For Railway to show running status
+// ✅ For Railway status check
 app.get('/', (req, res) => {
-  res.send('✅ Deepgram listener is running');
+  res.send('✅ Deepgram Listener is running');
 });
 
-// ✅ Serve Plivo XML from here
+// ✅ Serve Plivo XML
 app.get('/plivo-xml', (req, res) => {
   const xml = `
   <Response>
@@ -35,51 +35,52 @@ app.get('/plivo-xml', (req, res) => {
   res.send(xml.trim());
 });
 
-// ✅ Start listener
-app.listen(port, () => {
-  console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
-});
-
-// ✅ WebSocket logic
-app.ws('/listen', (ws, req) => {
+// ✅ WebSocket listener from Plivo
+app.ws('/listen', (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
 
-  ws.on('message', async (data) => {
-  try {
-    const parsed = JSON.parse(data.toString());
-    console.log('📦 Raw Deepgram Message:', parsed);
+  // 1️⃣ Open WebSocket to Deepgram
+  const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
+    headers: {
+      Authorization: `Token YOUR_DEEPGRAM_API_KEY`
+    }
+  });
 
-    if (parsed.type === 'transcript' && parsed.channel?.alternatives?.length) {
-      const transcript = parsed.channel.alternatives[0].transcript;
-
+  // 2️⃣ When Deepgram returns a transcript
+  deepgramWs.on('message', async (msg) => {
+    try {
+      const parsed = JSON.parse(msg.toString());
+      const transcript = parsed.channel?.alternatives?.[0]?.transcript;
       if (transcript) {
-        console.log(`💬 Transcript: ${transcript}`);
-
-        const n8n_webhook_url = "https://bms123.app.n8n.cloud/webhook/deepgram-transcript";
-
-        console.log('📤 Sending to n8n webhook:', {
-          url: n8n_webhook_url,
-          transcript,
-          timestamp: new Date().toISOString(),
-        });
-
-        await axios.post(n8n_webhook_url, {
+        console.log(`🗣️ Transcript: ${transcript}`);
+        await axios.post("https://bms123.app.n8n.cloud/webhook/deepgram-transcript", {
           transcript,
           timestamp: new Date().toISOString()
         });
       }
+    } catch (e) {
+      console.error('❌ Deepgram parse error:', e);
     }
+  });
 
-  } catch (err) {
-    console.error('❌ Error parsing or sending data:', err);
-  }
-});
+  // 3️⃣ Forward Plivo's audio to Deepgram
+  plivoWs.on('message', (audioChunk) => {
+    deepgramWs.readyState === 1 && deepgramWs.send(audioChunk);
+  });
 
+  plivoWs.on('close', () => {
+    console.log('❌ Plivo WebSocket disconnected');
+    deepgramWs.close();
+  });
 
-  ws.on('close', () => {
-    console.log('❌ WebSocket /listen disconnected');
+  deepgramWs.on('close', () => {
+    console.log('❌ Deepgram WebSocket closed');
   });
 });
 
-// ✅ Keep container alive on Railway
+// ✅ Keep Railway container alive
 setInterval(() => {}, 1000);
+
+app.listen(port, () => {
+  console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
+});
