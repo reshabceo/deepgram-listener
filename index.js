@@ -2,11 +2,18 @@ const express = require('express');
 const expressWs = require('express-ws');
 const WebSocket = require('ws');
 const axios = require('axios');
+const { createClient } = require('@supabase/supabase-js'); // ✅ Supabase
 
 const app = express();
 expressWs(app);
 
 const port = process.env.PORT || 3000;
+
+// ✅ Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
 // ✅ For Railway status check
 app.get('/', (req, res) => {
@@ -56,10 +63,26 @@ app.ws('/listen', (plivoWs, req) => {
         const transcript = parsed.channel.alternatives[0].transcript;
         if (transcript) {
           console.log(`🗣️ Transcript: ${transcript}`);
+
+          // ✅ 1. Send to n8n
           await axios.post("https://bms123.app.n8n.cloud/webhook/deepgram-transcript", {
             transcript,
             timestamp: new Date().toISOString()
           });
+
+          // ✅ 2. Store in Supabase
+          const { error } = await supabase.from('transcripts').insert([
+            {
+              transcript,
+              timestamp: new Date().toISOString(),
+              call_id: 'test-call-id' // Replace with dynamic UUID if available
+            }
+          ]);
+          if (error) {
+            console.error('❌ Supabase insert error:', error);
+          } else {
+            console.log('✅ Transcript saved in Supabase');
+          }
         }
       } else if (parsed.type === 'Error') {
         console.error('❌ Deepgram Error:', parsed.description);
@@ -74,19 +97,18 @@ app.ws('/listen', (plivoWs, req) => {
 
   // 🔁 Forward audio from Plivo to Deepgram
   plivoWs.on('message', (msg) => {
-  try {
-    const parsed = JSON.parse(msg.toString());
-    if (parsed.event === 'media' && parsed.media?.payload) {
-      const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
-      if (deepgramWs.readyState === 1) {
-        deepgramWs.send(audioBuffer);
+    try {
+      const parsed = JSON.parse(msg.toString());
+      if (parsed.event === 'media' && parsed.media?.payload) {
+        const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
+        if (deepgramWs.readyState === 1) {
+          deepgramWs.send(audioBuffer);
+        }
       }
+    } catch (e) {
+      console.error('❌ Failed to forward audio to Deepgram:', e);
     }
-  } catch (e) {
-    console.error('❌ Failed to forward audio to Deepgram:', e);
-  }
-});
-
+  });
 
   plivoWs.on('close', () => {
     console.log('❌ Plivo WebSocket disconnected');
