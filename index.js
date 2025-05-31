@@ -42,7 +42,7 @@ app.ws('/listen', (plivoWs, req) => {
   // 1️⃣ Open WebSocket to Deepgram
   const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
     headers: {
-      Authorization: `Token YOUR_DEEPGRAM_API_KEY`
+      Authorization: `c522bf04a9f8242b2275fb39f51c8723026ffa62Y`
     }
   });
 
