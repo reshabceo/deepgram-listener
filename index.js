@@ -39,35 +39,40 @@ app.get('/plivo-xml', (req, res) => {
 app.ws('/listen', (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
 
-  // 1️⃣ Open WebSocket to Deepgram
+  // 🔐 Deepgram connection
   const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
     headers: {
       Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
     }
   });
 
-  // 2️⃣ When Deepgram returns a transcript
+  // ✅ Receive message from Deepgram
   deepgramWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
 
-      // ✅ ADD THIS: Raw message debug
-      console.log('📦 Raw Deepgram Message:', parsed);
-
-      const transcript = parsed.channel?.alternatives?.[0]?.transcript;
-      if (transcript) {
-        console.log(`🗣️ Transcript: ${transcript}`);
-        await axios.post("https://bms123.app.n8n.cloud/webhook/deepgram-transcript", {
-          transcript,
-          timestamp: new Date().toISOString()
-        });
+      // ✅ Only process transcription messages
+      if (parsed.channel && parsed.channel.alternatives) {
+        const transcript = parsed.channel.alternatives[0].transcript;
+        if (transcript) {
+          console.log(`🗣️ Transcript: ${transcript}`);
+          await axios.post("https://bms123.app.n8n.cloud/webhook/deepgram-transcript", {
+            transcript,
+            timestamp: new Date().toISOString()
+          });
+        }
+      } else if (parsed.type === 'Error') {
+        console.error('❌ Deepgram Error:', parsed.description);
+      } else {
+        console.log('ℹ️ Ignored non-transcript message from Deepgram');
       }
+
     } catch (e) {
-      console.error('❌ Deepgram parse error:', e);
+      console.error('❌ JSON parse failed from Deepgram:', e);
     }
   });
 
-  // 3️⃣ Forward Plivo's audio to Deepgram
+  // 🔁 Forward audio from Plivo to Deepgram
   plivoWs.on('message', (audioChunk) => {
     if (deepgramWs.readyState === 1) {
       deepgramWs.send(audioChunk);
