@@ -1,54 +1,46 @@
+const express = require('express');
 const WebSocket = require('ws');
 const axios = require('axios');
 
-const DEEPGRAM_API_KEY = 'c522bf04a9f8242b2275fb39f51c8723026ffa62';
-const TRANSCRIPT_WEBHOOK = 'https://bms123.app.n8n.cloud/webhook/deepgram-transcript';
-const STATUS_WEBHOOK = 'https://bms123.app.n8n.cloud/webhook/stream-status';
+const app = express();
+const port = process.env.PORT || 3000;
 
-const deepgramSocket = new WebSocket(
-  `wss://api.deepgram.com/v1/listen?access_token=${DEEPGRAM_API_KEY}`,
-  {
-    headers: {
-      Authorization: `Token ${DEEPGRAM_API_KEY}`,
-    },
-  }
-);
-
-deepgramSocket.on('open', () => {
-  console.log('🟢 Connected to Deepgram WebSocket');
+const server = app.listen(port, () => {
+  console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
 });
 
-deepgramSocket.on('message', async (message) => {
-  if (!message.data) {
-    console.log('🟠 No data received from Deepgram');
-    return;
-  }
+const wss = new WebSocket.Server({ server });
 
-  try {
-    const data = JSON.parse(message.data);
-    const transcript = data.channel?.alternatives[0]?.transcript;
+wss.on('connection', function connection(ws) {
+  console.log('🔗 WebSocket connected');
 
-    if (transcript && transcript.length > 0) {
-      console.log('🧠 Final Transcript:', transcript);
-      await axios.post(TRANSCRIPT_WEBHOOK, { transcript });
+  ws.on('message', async function incoming(data) {
+    try {
+      const parsed = JSON.parse(data.toString());
+
+      if (parsed.channel && parsed.channel.alternatives) {
+        const transcript = parsed.channel.alternatives[0].transcript;
+        if (transcript) {
+          console.log(`📝 Transcript: ${transcript}`);
+
+          // Send to n8n
+          const n8n_webhook_url = "https://bms123.app.n8n.cloud/webhook/deepgram-transcript";
+
+          await axios.post(n8n_webhook_url, {
+            transcript: transcript,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error parsing or sending data:', error);
     }
-  } catch (err) {
-    console.error('❌ Error parsing message:', err.message);
-  }
+  });
+
+  ws.on('close', () => {
+    console.log('❌ WebSocket disconnected');
+  });
 });
 
-deepgramSocket.on('close', async () => {
-  console.log('🔴 Deepgram WebSocket closed');
-  try {
-    await axios.post(STATUS_WEBHOOK, {
-      status: 'disconnected',
-      event: 'close',
-    });
-    console.log('📬 Posted stream-status to n8n');
-  } catch (err) {
-    console.error('❌ Failed to post stream-status:', err.message);
-  }
-});
-
-// 🛑 Prevent process from exiting
+// Keep alive
 setInterval(() => {}, 1000);
