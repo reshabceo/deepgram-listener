@@ -73,11 +73,20 @@ app.ws('/listen', (plivoWs, req) => {
   });
 
   // 🔁 Forward audio from Plivo to Deepgram
-  plivoWs.on('message', (audioChunk) => {
-    if (deepgramWs.readyState === 1) {
-      deepgramWs.send(audioChunk);
+  plivoWs.on('message', (msg) => {
+  try {
+    const parsed = JSON.parse(msg.toString());
+    if (parsed.event === 'media' && parsed.media?.payload) {
+      const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
+      if (deepgramWs.readyState === 1) {
+        deepgramWs.send(audioBuffer);
+      }
     }
-  });
+  } catch (e) {
+    console.error('❌ Failed to forward audio to Deepgram:', e);
+  }
+});
+
 
   plivoWs.on('close', () => {
     console.log('❌ Plivo WebSocket disconnected');
