@@ -45,34 +45,36 @@ app.ws('/listen', (ws, req) => {
   console.log('📞 WebSocket /listen connected');
 
   ws.on('message', async (data) => {
-    try {
-      const parsed = JSON.parse(data.toString());
-      console.log('📦 Raw Deepgram Message:', parsed); // 🧪 Log entire payload for debugging
+  try {
+    const parsed = JSON.parse(data.toString());
+    console.log('📦 Raw Deepgram Message:', parsed);
 
-      if (parsed.channel && parsed.channel.alternatives) {
-        const transcript = parsed.channel.alternatives[0].transcript;
-        if (transcript) {
-          console.log(`💬 Transcript: ${transcript}`);
+    if (parsed.type === 'transcript' && parsed.channel?.alternatives?.length) {
+      const transcript = parsed.channel.alternatives[0].transcript;
 
-          const n8n_webhook_url = "https://bms123.app.n8n.cloud/webhook/deepgram-transcript";
+      if (transcript) {
+        console.log(`💬 Transcript: ${transcript}`);
 
-         console.log('📤 Sending to n8n webhook:', {
-  url: n8n_webhook_url,
-  transcript: transcript,
-  timestamp: new Date().toISOString()
-});
+        const n8n_webhook_url = "https://bms123.app.n8n.cloud/webhook/deepgram-transcript";
 
-await axios.post(n8n_webhook_url, {
-  transcript,
-  timestamp: new Date().toISOString()
-});
+        console.log('📤 Sending to n8n webhook:', {
+          url: n8n_webhook_url,
+          transcript,
+          timestamp: new Date().toISOString(),
+        });
 
-        }
+        await axios.post(n8n_webhook_url, {
+          transcript,
+          timestamp: new Date().toISOString()
+        });
       }
-    } catch (err) {
-      console.error('❌ Error parsing or sending data:', err);
     }
-  });
+
+  } catch (err) {
+    console.error('❌ Error parsing or sending data:', err);
+  }
+});
+
 
   ws.on('close', () => {
     console.log('❌ WebSocket /listen disconnected');
