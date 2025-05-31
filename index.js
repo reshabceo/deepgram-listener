@@ -50,6 +50,10 @@ app.ws('/listen', (plivoWs, req) => {
   deepgramWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
+
+      // ✅ ADD THIS: Raw message debug
+      console.log('📦 Raw Deepgram Message:', parsed);
+
       const transcript = parsed.channel?.alternatives?.[0]?.transcript;
       if (transcript) {
         console.log(`🗣️ Transcript: ${transcript}`);
@@ -65,7 +69,9 @@ app.ws('/listen', (plivoWs, req) => {
 
   // 3️⃣ Forward Plivo's audio to Deepgram
   plivoWs.on('message', (audioChunk) => {
-    deepgramWs.readyState === 1 && deepgramWs.send(audioChunk);
+    if (deepgramWs.readyState === 1) {
+      deepgramWs.send(audioChunk);
+    }
   });
 
   plivoWs.on('close', () => {
