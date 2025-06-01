@@ -413,243 +413,26 @@ function connectToDeepgram(callId) {
 }
 
 // Update the WebSocket listener section
-app.ws('/listen', async (plivoWs, req) => {
+app.ws('/listen', (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
   let keepAliveInterval;
   let processingTimeout;
-  let deepgramWs;
-  let reconnectAttempts = 0;
   
   // Generate unique call ID
   const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   // Initialize conversation context
-  try {
-    await conversationManager.initializeContext(callId);
-  } catch (err) {
+  conversationManager.initializeContext(callId).catch(err => {
     console.error('❌ Failed to initialize conversation:', err);
     plivoWs.close();
     return;
-  }
+  });
 
-  // Connect to Deepgram with retry logic
-  async function connectWithRetry() {
-    while (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      try {
-        console.log(`🔄 Attempting Deepgram connection (attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
-        deepgramWs = await connectToDeepgram(callId);
-        console.log('✅ Deepgram connection successful');
-        setupDeepgramHandlers();
-        return true;
-      } catch (error) {
-        reconnectAttempts++;
-        console.error(`❌ Deepgram connection attempt ${reconnectAttempts} failed:`, error);
-        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          console.log(`⏳ Waiting ${RECONNECT_DELAY}ms before retry...`);
-          await new Promise(resolve => setTimeout(resolve, RECONNECT_DELAY));
-        }
-      }
-    }
-    console.error('❌ Max reconnection attempts reached');
-    return false;
-  }
-
-  // Setup Deepgram event handlers
-  function setupDeepgramHandlers() {
-    deepgramWs.on('message', async (msg) => {
-      try {
-        console.log("🎙️ Raw Deepgram message received");
-        const parsed = JSON.parse(msg.toString());
-        console.log("📥 Parsed Deepgram message:", JSON.stringify(parsed, null, 2));
-        
-        const startTime = Date.now();
-
-        if (parsed.type === 'Results') {
-          console.log("📊 Deepgram results received");
-        }
-
-        if (parsed.channel?.alternatives) {
-          const context = conversationManager.getContext(callId);
-          if (!context) {
-            console.error('❌ No context found for call:', callId);
-            return;
-          }
-
-          const spokenText = parsed.channel.alternatives[0].transcript;
-          const confidence = parsed.channel.alternatives[0].confidence;
-          
-          console.log("🔍 Transcript Analysis:", {
-            text: spokenText,
-            confidence: confidence,
-            length: spokenText ? spokenText.length : 0,
-            isFillerWord: textUtils.isFiller(spokenText),
-            bufferLength: context.transcriptBuffer.length
-          });
-
-          if (!spokenText) {
-            console.log("ℹ️ Empty transcript received");
-            return;
-          }
-
-          // Only process high-confidence transcriptions
-          if (confidence < 0.7) {
-            console.log("ℹ️ Low confidence transcript ignored:", confidence);
-            return;
-          }
-
-          const now = Date.now();
-          const timeSinceLast = now - context.lastProcessedTime;
-          context.lastProcessedTime = now;
-
-          console.log("🗣️ Live:", spokenText, "(confidence:", confidence, ")");
-
-          // Update metrics for user speaking time
-          conversationManager.updateMetrics(callId, 'user_speaking', timeSinceLast);
-
-          if (!textUtils.isFiller(spokenText)) {
-            context.transcriptBuffer += ' ' + spokenText;
-            console.log("📝 Current buffer:", context.transcriptBuffer);
-            
-            // Only process if we have a substantial utterance
-            if (textUtils.isEndOfThought(spokenText, timeSinceLast) && 
-                context.transcriptBuffer.length >= 10) {
-              const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
-              console.log("✨ Processing complete utterance:", fullUtterance);
-              context.transcriptBuffer = '';
-
-              if (textUtils.hasMinimumQuality(fullUtterance)) {
-                console.log("🤖 Sending to OpenAI:", fullUtterance);
-                try {
-                  const aiResponse = await generateAIResponse(callId, fullUtterance);
-                  console.log("🤖 OpenAI Response:", aiResponse);
-                  
-                  if (aiResponse) {
-                    // Format the Speak XML properly with SSML tags
-                    const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
-                      <Response>
-                        <Speak voice="Polly.Joanna">
-                          <prosody rate="95%" pitch="+0%">${aiResponse}</prosody>
-                        </Speak>
-                      </Response>`;
-                    
-                    console.log("🔊 Preparing TTS response");
-                    
-                    // Send the TTS response back through the WebSocket
-                    if (plivoWs.readyState === WebSocket.OPEN) {
-                      const wsMessage = {
-                        event: 'speak',
-                        payload: ttsResponse
-                      };
-                      console.log("📤 Sending response to Plivo");
-                      plivoWs.send(JSON.stringify(wsMessage));
-                      console.log("✅ Response sent successfully");
-                      
-                      // Update metrics for AI response time
-                      const responseEndTime = Date.now();
-                      conversationManager.updateMetrics(callId, 'ai_response', responseEndTime - startTime);
-                    } else {
-                      console.error("❌ WebSocket not open for TTS response. State:", plivoWs.readyState);
-                    }
-                  } else {
-                    console.error("❌ No AI response generated");
-                  }
-                } catch (error) {
-                  console.error("❌ Error in AI response flow:", error);
-                }
-              } else {
-                console.log("⏭️ Utterance did not meet quality threshold");
-              }
-            } else {
-              console.log("⏳ Buffering speech, waiting for end of thought");
-            }
-          } else {
-            console.log("⏭️ Filler word detected, skipping");
-          }
-
-          // Store in transcripts
-          try {
-            await supabase.from('transcripts').insert([{
-              call_id: callId,
-              transcript: spokenText,
-              timestamp: new Date().toISOString(),
-              is_processed: true,
-              confidence: confidence
-            }]);
-          } catch (error) {
-            console.error('❌ Supabase insert error:', error);
-          }
-        } else if (parsed.type === 'Error') {
-          console.error('❌ Deepgram Error:', parsed.description);
-        }
-      } catch (error) {
-        console.error('❌ Error processing Deepgram message:', error);
-      }
-    });
-
-    deepgramWs.on('close', async (code, reason) => {
-      console.log(`❌ Deepgram WebSocket closed. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
-      console.log('Final state:', deepgramWs.readyState);
-      
-      // Attempt to reconnect if not max attempts
-      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        console.log('🔄 Attempting to reconnect to Deepgram...');
-        const success = await connectWithRetry();
-        if (!success) {
-          console.error('❌ Failed to reconnect to Deepgram');
-          cleanup();
-        }
-      } else {
-        console.error('❌ Max reconnection attempts reached');
-        cleanup();
-      }
-    });
-  }
-
-  // Initialize Deepgram connection
-  const connected = await connectWithRetry();
-  if (!connected) {
-    console.error('❌ Failed to establish Deepgram connection');
-    plivoWs.close();
-    return;
-  }
-
-  // Handle Plivo messages with connection check
-  plivoWs.on('message', async (msg) => {
-    try {
-      const parsed = JSON.parse(msg.toString());
-      console.log("📥 Received Plivo message:", parsed.event);
-      resetProcessingTimeout();
-
-      if (parsed.event === 'media' && parsed.media?.payload) {
-        console.log("🎵 Received audio data, length:", parsed.media.payload.length);
-        const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
-        console.log("🎵 Decoded audio buffer size:", audioBuffer.length);
-        
-        if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
-          console.error("❌ Deepgram WebSocket not connected. Attempting reconnect...");
-          const success = await connectWithRetry();
-          if (!success) {
-            console.error("❌ Failed to reconnect to Deepgram");
-            return;
-          }
-        }
-
-        try {
-          deepgramWs.send(audioBuffer);
-          console.log("✈️ Sent audio data to Deepgram, size:", audioBuffer.length);
-        } catch (error) {
-          console.error("❌ Failed to send audio to Deepgram:", error);
-        }
-      } else if (parsed.event === 'speak_ended') {
-        console.log("🔊 TTS playback completed");
-      } else if (parsed.event === 'speak_started') {
-        console.log("🔊 TTS playback started");
-      } else {
-        console.log("ℹ️ Other Plivo event:", parsed.event);
-      }
-    } catch (e) {
-      console.error('❌ Failed to process Plivo message:', e);
-      console.error('Message was:', msg.toString().substring(0, 100) + '...');
+  // Initialize Deepgram WebSocket
+  console.log('🎙️ Initializing Deepgram connection...');
+  const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
+    headers: {
+      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
     }
   });
 
@@ -657,11 +440,9 @@ app.ws('/listen', async (plivoWs, req) => {
   keepAliveInterval = setInterval(() => {
     if (plivoWs.readyState === WebSocket.OPEN) {
       plivoWs.ping();
-      console.log('🏓 Sent ping to Plivo');
     }
     if (deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.ping();
-      console.log('🏓 Sent ping to Deepgram');
     }
   }, KEEP_ALIVE_INTERVAL);
 
@@ -673,24 +454,134 @@ app.ws('/listen', async (plivoWs, req) => {
     }, PROCESSING_TIMEOUT);
   };
 
-  // WebSocket health check
-  const healthCheck = setInterval(() => {
-    if (plivoWs.readyState !== WebSocket.OPEN) {
-      console.error('❌ Plivo WebSocket disconnected, state:', plivoWs.readyState);
-      cleanup();
+  // Handle Deepgram connection
+  deepgramWs.on('open', () => {
+    console.log('🎙️ Deepgram WebSocket connected');
+    resetProcessingTimeout();
+  });
+
+  deepgramWs.on('error', (error) => {
+    console.error('❌ Deepgram WebSocket error:', error);
+  });
+
+  // Handle Plivo messages
+  plivoWs.on('message', async (msg) => {
+    try {
+      const parsed = JSON.parse(msg.toString());
+      console.log("📥 Received Plivo message:", parsed.event);
+      resetProcessingTimeout();
+
+      if (parsed.event === 'media' && parsed.media?.payload) {
+        console.log("🎵 Received audio data, length:", parsed.media.payload.length);
+        const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
+        console.log("🎵 Decoded audio buffer size:", audioBuffer.length);
+        
+        if (deepgramWs.readyState === WebSocket.OPEN) {
+          deepgramWs.send(audioBuffer);
+          console.log("✈️ Sent audio data to Deepgram");
+        } else {
+          console.error("❌ Deepgram WebSocket not open. State:", deepgramWs.readyState);
+        }
+      } else if (parsed.event === 'speak_ended') {
+        console.log("🔊 TTS playback completed");
+      } else if (parsed.event === 'speak_started') {
+        console.log("🔊 TTS playback started");
+      }
+    } catch (e) {
+      console.error('❌ Failed to process Plivo message:', e);
     }
-    if (deepgramWs.readyState !== WebSocket.OPEN) {
-      console.error('❌ Deepgram WebSocket disconnected, state:', deepgramWs.readyState);
-      cleanup();
+  });
+
+  // Handle Deepgram messages
+  deepgramWs.on('message', async (msg) => {
+    try {
+      const parsed = JSON.parse(msg.toString());
+      
+      if (parsed.channel?.alternatives) {
+        const context = conversationManager.getContext(callId);
+        if (!context) {
+          console.error('❌ No context found for call:', callId);
+          return;
+        }
+
+        const spokenText = parsed.channel.alternatives[0].transcript;
+        const confidence = parsed.channel.alternatives[0].confidence;
+        
+        if (!spokenText) return;
+
+        const now = Date.now();
+        const timeSinceLast = now - context.lastProcessedTime;
+        context.lastProcessedTime = now;
+
+        console.log("🗣️ Live:", spokenText);
+
+        // Update metrics for user speaking time
+        conversationManager.updateMetrics(callId, 'user_speaking', timeSinceLast);
+
+        if (!textUtils.isFiller(spokenText)) {
+          context.transcriptBuffer += ' ' + spokenText;
+          
+          if (textUtils.isEndOfThought(spokenText, timeSinceLast)) {
+            const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
+            context.transcriptBuffer = '';
+
+            if (textUtils.hasMinimumQuality(fullUtterance)) {
+              console.log("🤖 Processing utterance:", fullUtterance);
+              
+              try {
+                const aiResponse = await generateAIResponse(callId, fullUtterance);
+                if (aiResponse) {
+                  console.log("🤖 AI Response:", aiResponse);
+                  
+                  // Format the Speak XML properly
+                  const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
+                    <Response>
+                      <Speak voice="Polly.Joanna">${aiResponse}</Speak>
+                    </Response>`;
+                  
+                  // Send the TTS response back through the WebSocket
+                  if (plivoWs.readyState === WebSocket.OPEN) {
+                    const wsMessage = {
+                      event: 'speak',
+                      payload: ttsResponse
+                    };
+                    plivoWs.send(JSON.stringify(wsMessage));
+                  } else {
+                    console.error("❌ WebSocket not open for TTS response. State:", plivoWs.readyState);
+                  }
+                } else {
+                  console.error("❌ No AI response generated");
+                }
+              } catch (error) {
+                console.error("❌ Error generating AI response:", error);
+              }
+            }
+          }
+        }
+
+        // Store in transcripts
+        try {
+          await supabase.from('transcripts').insert([{
+            call_id: callId,
+            transcript: spokenText,
+            timestamp: new Date().toISOString(),
+            is_processed: true,
+            confidence: confidence
+          }]);
+        } catch (error) {
+          console.error('❌ Supabase insert error:', error);
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error processing Deepgram message:', error);
     }
-  }, 5000);
+  });
 
   // Clean up function
   const cleanup = async () => {
     console.log('🧹 Cleaning up connections');
     if (keepAliveInterval) clearInterval(keepAliveInterval);
     if (processingTimeout) clearTimeout(processingTimeout);
-    if (healthCheck) clearInterval(healthCheck);
     
     if (deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.close();
@@ -701,10 +592,15 @@ app.ws('/listen', async (plivoWs, req) => {
     await conversationManager.endConversation(callId);
   };
 
-  // Add error event handlers with more detail
-  plivoWs.on('error', (error) => {
-    console.error('❌ Plivo WebSocket error:', error.message || error);
-    console.error('Stack:', error.stack);
+  // Handle connection closures
+  plivoWs.on('close', (code, reason) => {
+    console.log(`❌ Plivo WebSocket disconnected. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
+    cleanup();
+  });
+
+  deepgramWs.on('close', (code, reason) => {
+    console.log(`❌ Deepgram WebSocket closed. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
+    cleanup();
   });
 });
 
