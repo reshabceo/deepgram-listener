@@ -53,6 +53,8 @@ class ConversationManager {
   }
 
   async initializeContext(callId) {
+    console.log("🎯 Initializing context for call:", callId);
+    
     const context = {
       messages: [{
         role: "system",
@@ -67,24 +69,32 @@ class ConversationManager {
       silenceCount: 0,
       startTime: Date.now()
     };
+
     this.contexts.set(callId, context);
     
-    // Initialize metrics
+    // Initialize metrics with timestamps
     this.metrics.set(callId, {
       startTime: Date.now(),
       userSpeakingTime: 0,
       aiResponseTime: 0,
       silenceTime: 0,
       turnCount: 0,
-      responseTimes: []
+      responseTimes: [],
+      lastMetricUpdate: Date.now()
     });
     
-    // Store conversation start in Supabase
-    await supabase.from('conversations').insert([{
-      call_id: callId,
-      start_time: new Date().toISOString(),
-      status: 'active'
-    }]);
+    try {
+      // Store conversation start in Supabase
+      await supabase.from('conversations').insert([{
+        call_id: callId,
+        start_time: new Date().toISOString(),
+        status: 'active'
+      }]);
+      console.log("💾 Initialized conversation in database");
+    } catch (error) {
+      console.error('❌ Failed to initialize conversation in database:', error);
+      throw error;
+    }
   }
 
   getContext(callId) {
@@ -105,48 +115,13 @@ class ConversationManager {
     }
   }
 
-  async endConversation(callId) {
-    try {
-      const metrics = this.metrics.get(callId);
-      const endTime = Date.now();
-      
-      // Update conversation status
-      await supabase.from('conversations')
-        .update({
-          end_time: new Date().toISOString(),
-          status: 'completed'
-        })
-        .eq('call_id', callId);
-
-      // Store call metrics
-      if (metrics) {
-        const totalDuration = endTime - metrics.startTime;
-        const avgResponseTime = metrics.responseTimes.length > 0 
-          ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length 
-          : 0;
-
-        await supabase.from('call_metrics').insert([{
-          call_id: callId,
-          total_duration: totalDuration,
-          user_speaking_time: metrics.userSpeakingTime,
-          ai_response_time: metrics.aiResponseTime,
-          silence_time: metrics.silenceTime,
-          turn_count: metrics.turnCount,
-          average_response_time: avgResponseTime
-        }]);
-      }
-
-      // Clean up
-      this.contexts.delete(callId);
-      this.metrics.delete(callId);
-    } catch (error) {
-      console.error('❌ Error ending conversation:', error);
-    }
-  }
-
   updateMetrics(callId, type, duration) {
+    console.log(`📊 Updating metrics for ${callId} - Type: ${type}, Duration: ${duration}ms`);
+    
     const metrics = this.metrics.get(callId);
     if (metrics) {
+      const now = Date.now();
+      
       switch (type) {
         case 'user_speaking':
           metrics.userSpeakingTime += duration;
@@ -162,6 +137,63 @@ class ConversationManager {
           metrics.turnCount++;
           break;
       }
+      
+      metrics.lastMetricUpdate = now;
+      console.log(`📊 Updated metrics for ${callId}:`, metrics);
+    } else {
+      console.error(`❌ No metrics found for call: ${callId}`);
+    }
+  }
+
+  async endConversation(callId) {
+    console.log(`🔚 Ending conversation for call: ${callId}`);
+    
+    try {
+      const metrics = this.metrics.get(callId);
+      const endTime = Date.now();
+      
+      if (metrics) {
+        const totalDuration = endTime - metrics.startTime;
+        const avgResponseTime = metrics.responseTimes.length > 0 
+          ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length 
+          : 0;
+
+        console.log(`📊 Final metrics for ${callId}:`, {
+          totalDuration,
+          userSpeakingTime: metrics.userSpeakingTime,
+          aiResponseTime: metrics.aiResponseTime,
+          silenceTime: metrics.silenceTime,
+          turnCount: metrics.turnCount,
+          avgResponseTime
+        });
+
+        // Update conversation status
+        await supabase.from('conversations')
+          .update({
+            end_time: new Date().toISOString(),
+            status: 'completed'
+          })
+          .eq('call_id', callId);
+
+        // Store call metrics
+        await supabase.from('call_metrics').insert([{
+          call_id: callId,
+          total_duration: totalDuration,
+          user_speaking_time: metrics.userSpeakingTime,
+          ai_response_time: metrics.aiResponseTime,
+          silence_time: metrics.silenceTime,
+          turn_count: metrics.turnCount,
+          average_response_time: avgResponseTime
+        }]);
+        
+        console.log("💾 Stored final metrics in database");
+      }
+
+      // Clean up
+      this.contexts.delete(callId);
+      this.metrics.delete(callId);
+    } catch (error) {
+      console.error('❌ Error ending conversation:', error);
     }
   }
 }
@@ -395,22 +427,44 @@ app.ws('/listen', (plivoWs, req) => {
                 if (aiResponse) {
                   console.log("🤖 AI Response:", aiResponse);
                   
-                  // Send TTS response using Plivo's Speak XML
-                  const ttsResponse = `
+                  // Format the Speak XML properly
+                  const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
                     <Response>
-                      <Speak language="en-US" voice="Polly.Joanna">
-                        ${aiResponse}
-                      </Speak>
-                    </Response>
-                  `;
+                      <Speak voice="Polly.Joanna">${aiResponse}</Speak>
+                    </Response>`;
+                  
+                  console.log("🔊 Sending TTS response:", ttsResponse);
                   
                   // Send the TTS response back through the WebSocket
                   if (plivoWs.readyState === WebSocket.OPEN) {
-                    plivoWs.send(JSON.stringify({
-                      event: 'tts',
+                    const wsMessage = {
+                      event: 'speak',
                       payload: ttsResponse
-                    }));
+                    };
+                    console.log("📤 Sending WebSocket message:", JSON.stringify(wsMessage));
+                    plivoWs.send(JSON.stringify(wsMessage));
+                  } else {
+                    console.error("❌ WebSocket not open for TTS response");
                   }
+
+                  // Update metrics for AI response time
+                  const responseEndTime = Date.now();
+                  conversationManager.updateMetrics(callId, 'ai_response', responseEndTime - startTime);
+                  
+                  // Log the conversation turn
+                  try {
+                    await supabase.from('conversation_turns').insert([{
+                      call_id: callId,
+                      user_message: fullUtterance,
+                      ai_response: aiResponse,
+                      timestamp: new Date().toISOString()
+                    }]);
+                    console.log("💾 Stored conversation turn in database");
+                  } catch (error) {
+                    console.error("❌ Failed to store conversation turn:", error);
+                  }
+                } else {
+                  console.error("❌ No AI response generated");
                 }
               } catch (error) {
                 console.error('❌ Failed to generate AI response:', error);
