@@ -517,7 +517,7 @@ app.ws('/listen', async (plivoWs, req) => {
 
   // Initialize Deepgram WebSocket with simple configuration
   console.log('🎙️ Initializing Deepgram connection...');
-  const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
+  const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&model=general', {
     headers: {
       Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
     }
@@ -544,11 +544,13 @@ app.ws('/listen', async (plivoWs, req) => {
   // Handle Deepgram connection
   deepgramWs.on('open', () => {
     console.log('🎙️ Deepgram WebSocket connected');
+    console.log('🔗 Connection Status:', deepgramWs.readyState);
     resetProcessingTimeout();
   });
 
   deepgramWs.on('error', (error) => {
     console.error('❌ Deepgram WebSocket error:', error);
+    console.error('🔗 Connection Status:', deepgramWs.readyState);
   });
 
   // Handle Plivo messages
@@ -564,8 +566,12 @@ app.ws('/listen', async (plivoWs, req) => {
         console.log("🎵 Decoded audio buffer size:", audioBuffer.length);
         
         if (deepgramWs.readyState === WebSocket.OPEN) {
-          deepgramWs.send(audioBuffer);
-          console.log("✈️ Sent audio data to Deepgram");
+          try {
+            deepgramWs.send(audioBuffer);
+            console.log("✈️ Sent audio data to Deepgram");
+          } catch (error) {
+            console.error("❌ Error sending audio to Deepgram:", error);
+          }
         } else {
           console.error("❌ Deepgram WebSocket not open. State:", deepgramWs.readyState);
         }
@@ -575,10 +581,15 @@ app.ws('/listen', async (plivoWs, req) => {
     }
   });
 
-  // Handle Deepgram messages
+  // Handle Deepgram messages with enhanced logging
   deepgramWs.on('message', async (msg) => {
     try {
-      const parsed = JSON.parse(msg.toString());
+      console.log('📥 Raw Deepgram message received');
+      const rawMessage = msg.toString();
+      console.log('📝 Raw message content:', rawMessage);
+      
+      const parsed = JSON.parse(rawMessage);
+      console.log('🔍 Parsed Deepgram message:', JSON.stringify(parsed, null, 2));
       
       if (parsed.channel?.alternatives) {
         const context = conversationManager.getContext(callId);
@@ -590,13 +601,17 @@ app.ws('/listen', async (plivoWs, req) => {
         const spokenText = parsed.channel.alternatives[0].transcript;
         const confidence = parsed.channel.alternatives[0].confidence;
         
-        if (!spokenText) return;
+        if (!spokenText) {
+          console.log('⚠️ Empty transcript received');
+          return;
+        }
+
+        console.log("🗣️ Transcribed:", spokenText);
+        console.log("📊 Confidence:", confidence);
 
         const now = Date.now();
         const timeSinceLast = now - context.lastProcessedTime;
         context.lastProcessedTime = now;
-
-        console.log("🗣️ Live:", spokenText);
 
         // Update metrics for user speaking time
         conversationManager.updateMetrics(callId, 'user_speaking', timeSinceLast);
