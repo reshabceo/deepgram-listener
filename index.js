@@ -46,43 +46,70 @@ app.get('/plivo-xml', (req, res) => {
 app.ws('/listen', (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
 
-  // 🔐 Deepgram connection
   const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
     headers: {
       Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
     }
   });
 
+  // 🧠 Smart Grouping Variables
+  let transcriptBuffer = '';
+  let lastTranscriptTime = Date.now();
+
+  function isFiller(text) {
+    return ['uh', 'umm', 'hmm', 'ah', 'eh', 'like', 'you know'].includes(text.toLowerCase().trim());
+  }
+
+  function isEndOfSentence(text) {
+    return /[.?!]$/.test(text.trim()) || text.toLowerCase().endsWith("okay") || text.toLowerCase().endsWith("right");
+  }
+
+  function sendToChatGPT(utterance) {
+    // 🔁 Placeholder for GPT call
+    console.log("🤖 GPT input:", utterance);
+  }
+
   // ✅ Receive message from Deepgram
   deepgramWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
 
-      // ✅ Only process transcription messages
-      if (parsed.channel && parsed.channel.alternatives) {
-        const transcript = parsed.channel.alternatives[0].transcript;
-        if (transcript) {
-          console.log(`🗣️ Transcript: ${transcript}`);
+      if (parsed.channel?.alternatives) {
+        const spokenText = parsed.channel.alternatives[0].transcript;
+        if (spokenText) {
+          const now = Date.now();
+          const timeSinceLast = now - lastTranscriptTime;
+          lastTranscriptTime = now;
 
-          // ✅ 1. Send to n8n
+          console.log("🗣️ Live:", spokenText);
+
+          if (!isFiller(spokenText)) {
+            transcriptBuffer += ' ' + spokenText;
+
+            if (timeSinceLast > 1000 || isEndOfSentence(spokenText)) {
+              const fullUtterance = transcriptBuffer.trim();
+              transcriptBuffer = ''; // Reset buffer
+
+              // ✅ Send to GPT (placeholder)
+              sendToChatGPT(fullUtterance);
+            }
+          }
+
+          // ✅ Send to n8n
           await axios.post("https://bms123.app.n8n.cloud/webhook/deepgram-transcript", {
-            transcript,
+            transcript: spokenText,
             timestamp: new Date().toISOString()
           });
 
-          // ✅ 2. Store in Supabase
+          // ✅ Store in Supabase
           const { error } = await supabase.from('transcripts').insert([
             {
-              transcript,
+              transcript: spokenText,
               timestamp: new Date().toISOString(),
-              call_id: 'test-call-id' // Replace with dynamic UUID if available
+              call_id: 'test-call-id'
             }
           ]);
-          if (error) {
-            console.error('❌ Supabase insert error:', error);
-          } else {
-            console.log('✅ Transcript saved in Supabase');
-          }
+          if (error) console.error('❌ Supabase insert error:', error);
         }
       } else if (parsed.type === 'Error') {
         console.error('❌ Deepgram Error:', parsed.description);
