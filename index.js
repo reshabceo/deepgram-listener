@@ -252,7 +252,7 @@ async function generateAIResponse(callId, userMessage) {
     });
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4",
+      model: "gpt-3.5-turbo",
       messages: context.messages,
       temperature: 0.7,
       max_tokens: 150,
@@ -375,14 +375,20 @@ app.ws('/listen', (plivoWs, req) => {
   plivoWs.on('message', (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
+      console.log("📥 Received Plivo message:", parsed.event);
+      
       if (parsed.event === 'media' && parsed.media?.payload) {
         const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
         if (deepgramWs.readyState === WebSocket.OPEN) {
           deepgramWs.send(audioBuffer);
         }
+      } else if (parsed.event === 'speak_ended') {
+        console.log("🔊 TTS playback completed");
+      } else if (parsed.event === 'speak_started') {
+        console.log("🔊 TTS playback started");
       }
     } catch (e) {
-      console.error('❌ Failed to forward audio to Deepgram:', e);
+      console.error('❌ Failed to process Plivo message:', e);
     }
   });
 
@@ -433,7 +439,7 @@ app.ws('/listen', (plivoWs, req) => {
                       <Speak voice="Polly.Joanna">${aiResponse}</Speak>
                     </Response>`;
                   
-                  console.log("🔊 Sending TTS response:", ttsResponse);
+                  console.log("🔊 Preparing TTS response:", ttsResponse);
                   
                   // Send the TTS response back through the WebSocket
                   if (plivoWs.readyState === WebSocket.OPEN) {
@@ -441,10 +447,11 @@ app.ws('/listen', (plivoWs, req) => {
                       event: 'speak',
                       payload: ttsResponse
                     };
-                    console.log("📤 Sending WebSocket message:", JSON.stringify(wsMessage));
+                    console.log("📤 Sending WebSocket message to Plivo:", JSON.stringify(wsMessage));
                     plivoWs.send(JSON.stringify(wsMessage));
+                    console.log("✅ Message sent to Plivo successfully");
                   } else {
-                    console.error("❌ WebSocket not open for TTS response");
+                    console.error("❌ WebSocket not open for TTS response. State:", plivoWs.readyState);
                   }
 
                   // Update metrics for AI response time
@@ -497,8 +504,8 @@ app.ws('/listen', (plivoWs, req) => {
   });
 
   // Handle connection closures
-  plivoWs.on('close', () => {
-    console.log('❌ Plivo WebSocket disconnected');
+  plivoWs.on('close', (code, reason) => {
+    console.log(`❌ Plivo WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
     cleanup();
   });
 
