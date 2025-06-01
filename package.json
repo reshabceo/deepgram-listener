@@ -2,7 +2,7 @@
   "private": true,
   "name": "deepgram-listener",
   "version": "1.0.0",
-  "description": "AI-powered phone call agent using Deepgram, OpenAI, and Plivo",
+  "description": "AI-powered phone call agent using Deepgram, Hugging Face, and Plivo",
   "license": "UNLICENSED",
   "main": "index.js",
   "type": "commonjs",
@@ -16,7 +16,7 @@
   },
   "keywords": [
     "deepgram",
-    "openai",
+    "hugging-face",
     "plivo",
     "voice",
     "transcription",
@@ -33,7 +33,6 @@
     "dotenv": "16.4.1",
     "express": "4.21.2",
     "express-ws": "5.0.2",
-    "openai": "4.24.7",
     "ws": "8.18.2",
     "node-fetch": "2.7.0"
   },

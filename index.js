@@ -5,12 +5,10 @@ const expressWs = require('express-ws');
 const WebSocket = require('ws');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
-const OpenAI = require('openai');
 const fetch = require('node-fetch');
 
 // Validate required environment variables
 const requiredEnvVars = [
-  'OPENAI_API_KEY',
   'SUPABASE_URL',
   'SUPABASE_SERVICE_KEY',
   'DEEPGRAM_API_KEY'
@@ -35,15 +33,7 @@ const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
-const USE_HUGGING_FACE = true; // Switch to use Hugging Face instead of OpenAI
 const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill";
-
-// Initialize OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  maxRetries: 3,
-  timeout: 30000
-});
 
 // Supabase client
 const supabase = createClient(
@@ -294,51 +284,35 @@ async function generateAIResponse(callId, userMessage) {
 
     let aiResponse;
     
-    if (USE_HUGGING_FACE) {
-      try {
-        console.log("🤖 Using Hugging Face for response generation");
-        const response = await fetch(HUGGING_FACE_API_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            inputs: userMessage,
-            parameters: {
-              max_length: 100,
-              temperature: 0.7,
-              top_p: 0.9,
-              do_sample: true
-            }
-          }),
-        });
+    try {
+      console.log("🤖 Using Hugging Face for response generation");
+      const response = await fetch(HUGGING_FACE_API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          inputs: userMessage,
+          parameters: {
+            max_length: 100,
+            temperature: 0.7,
+            top_p: 0.9,
+            do_sample: true
+          }
+        }),
+      });
 
-        if (!response.ok) {
-          throw new Error(`Hugging Face API error: ${response.status} - ${await response.text()}`);
-        }
+      if (!response.ok) {
+        throw new Error(`Hugging Face API error: ${response.status} - ${await response.text()}`);
+      }
 
-        const result = await response.json();
-        aiResponse = result[0]?.generated_text || FALLBACK_RESPONSES[0];
-        console.log("🤖 Hugging Face response:", aiResponse);
-      } catch (error) {
-        console.error("❌ Hugging Face API error:", error);
-        // Use fallback if Hugging Face fails
-        aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-      }
-    } else {
-      try {
-        const completion = await openai.chat.completions.create({
-          model: "gpt-3.5-turbo",
-          messages: context.messages,
-          temperature: 0.7,
-          max_tokens: 100,
-          presence_penalty: 0.6
-        });
-        aiResponse = completion.choices[0].message.content;
-      } catch (error) {
-        console.error('❌ OpenAI API error:', error);
-        aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-      }
+      const result = await response.json();
+      aiResponse = result[0]?.generated_text || FALLBACK_RESPONSES[0];
+      console.log("🤖 Hugging Face response:", aiResponse);
+    } catch (error) {
+      console.error("❌ Hugging Face API error:", error);
+      // Use fallback if Hugging Face fails
+      aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
     }
 
     const responseTime = Date.now() - startTime;
@@ -357,7 +331,7 @@ async function generateAIResponse(callId, userMessage) {
         call_id: callId,
         user_message: userMessage,
         ai_response: aiResponse,
-        is_hugging_face: USE_HUGGING_FACE,
+        is_hugging_face: true,
         timestamp: new Date().toISOString()
       }]);
     } catch (dbError) {
