@@ -398,17 +398,15 @@ app.get('/plivo-xml', (req, res) => {
   res.send(xml);
 });
 
-// Add Deepgram configuration at the top level
+// Constants for API configuration
 const DEEPGRAM_CONFIG = {
   encoding: 'mulaw',
   sample_rate: 8000,
   channels: 1,
-  model: 'nova-2',
-  language: 'en',
+  model: 'general',
+  language: 'en-US',
   punctuate: true,
-  interim_results: false,
-  endpointing: true,
-  utterance_end_ms: 1000
+  interim_results: false
 };
 
 // Update the Deepgram connection function with retries
@@ -428,7 +426,8 @@ async function connectToDeepgram(callId, attempt = 1) {
     try {
       ws = new WebSocket(url, {
         headers: {
-          Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+          Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+          'Content-Type': 'application/json'
         }
       });
     } catch (error) {
@@ -517,9 +516,13 @@ app.ws('/listen', async (plivoWs, req) => {
 
   // Initialize Deepgram WebSocket with simple configuration
   console.log('🎙️ Initializing Deepgram connection...');
-  const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&model=general', {
+  const wsUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(DEEPGRAM_CONFIG).toString()}`;
+  console.log('🔗 Connecting to:', wsUrl);
+
+  const deepgramWs = new WebSocket(wsUrl, {
     headers: {
-      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+      'Content-Type': 'application/json'
     }
   });
 
@@ -545,6 +548,7 @@ app.ws('/listen', async (plivoWs, req) => {
   deepgramWs.on('open', () => {
     console.log('🎙️ Deepgram WebSocket connected');
     console.log('🔗 Connection Status:', deepgramWs.readyState);
+    console.log('📝 Using config:', DEEPGRAM_CONFIG);
     resetProcessingTimeout();
   });
 
@@ -581,118 +585,130 @@ app.ws('/listen', async (plivoWs, req) => {
     }
   });
 
-  // Handle Deepgram messages with enhanced logging
+  // Handle Deepgram messages
   deepgramWs.on('message', async (msg) => {
     try {
-      console.log('📥 Raw Deepgram message received');
-      const rawMessage = msg.toString();
-      console.log('📝 Raw message content:', rawMessage);
+      const parsed = JSON.parse(msg.toString());
       
-      const parsed = JSON.parse(rawMessage);
-      console.log('🔍 Parsed Deepgram message:', JSON.stringify(parsed, null, 2));
-      
-      if (parsed.channel?.alternatives) {
+      if (parsed.type === 'Results' && parsed.channel?.alternatives?.length > 0) {
+        const transcript = parsed.channel.alternatives[0].transcript;
+        
+        if (!transcript || transcript.trim() === '') {
+          return;
+        }
+
+        console.log("🗣️ Transcribed:", transcript);
+
         const context = conversationManager.getContext(callId);
         if (!context) {
           console.error('❌ No context found for call:', callId);
           return;
         }
 
-        const spokenText = parsed.channel.alternatives[0].transcript;
-        const confidence = parsed.channel.alternatives[0].confidence;
-        
-        if (!spokenText) {
-          console.log('⚠️ Empty transcript received');
-          return;
-        }
-
-        console.log("🗣️ Transcribed:", spokenText);
-        console.log("📊 Confidence:", confidence);
-
+        // Update context and check for complete thought
+        context.transcriptBuffer += ' ' + transcript;
         const now = Date.now();
         const timeSinceLast = now - context.lastProcessedTime;
         context.lastProcessedTime = now;
 
-        // Update metrics for user speaking time
-        conversationManager.updateMetrics(callId, 'user_speaking', timeSinceLast);
+        if (textUtils.isEndOfThought(transcript, timeSinceLast)) {
+          const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
+          context.transcriptBuffer = '';
 
-        if (!textUtils.isFiller(spokenText)) {
-          context.transcriptBuffer += ' ' + spokenText;
-          
-          if (textUtils.isEndOfThought(spokenText, timeSinceLast)) {
-            const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
-            context.transcriptBuffer = '';
+          if (textUtils.hasMinimumQuality(fullUtterance)) {
+            console.log("🤖 Processing utterance:", fullUtterance);
+            
+            try {
+              // Call Hugging Face API with retry
+              let retryCount = 0;
+              const maxRetries = 3;
+              let aiResponse;
 
-            if (textUtils.hasMinimumQuality(fullUtterance)) {
-              console.log("🤖 Processing utterance:", fullUtterance);
-              
-              try {
-                // Call Hugging Face API
-                console.log("🤖 Calling Hugging Face API...");
-                const response = await fetch(HUGGING_FACE_API_URL, {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
-                  },
-                  body: JSON.stringify({
-                    inputs: fullUtterance,
-                    options: {
-                      wait_for_model: true,
-                      max_length: 100
-                    }
-                  }),
-                });
-
-                if (!response.ok) {
-                  throw new Error(`Hugging Face API error: ${response.status}`);
-                }
-
-                const result = await response.json();
-                const aiResponse = result[0]?.generated_text || "I'm not sure how to respond to that.";
-                console.log("🤖 AI Response:", aiResponse);
-                
-                // Format and send TTS response
-                const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
-                  <Response>
-                    <Speak voice="Polly.Joanna">${aiResponse}</Speak>
-                  </Response>`;
-                
-                if (plivoWs.readyState === WebSocket.OPEN) {
-                  plivoWs.send(JSON.stringify({
-                    event: 'speak',
-                    payload: ttsResponse
-                  }));
-                }
-
-                // Store in database
+              while (retryCount < maxRetries) {
                 try {
-                  await supabase.from('conversation_turns').insert([{
-                    call_id: callId,
-                    user_message: fullUtterance,
-                    ai_response: aiResponse,
-                    is_hugging_face: true,
-                    timestamp: new Date().toISOString()
-                  }]);
-                } catch (dbError) {
-                  console.error('❌ Database error:', dbError);
-                }
+                  console.log(`🤖 Calling Hugging Face API (attempt ${retryCount + 1}/${maxRetries})...`);
+                  const response = await fetch(HUGGING_FACE_API_URL, {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
+                    },
+                    body: JSON.stringify({
+                      inputs: fullUtterance,
+                      parameters: {
+                        max_length: 100,
+                        temperature: 0.7,
+                        top_p: 0.9,
+                        do_sample: true
+                      }
+                    }),
+                  });
 
-              } catch (error) {
-                console.error("❌ Error in AI response:", error);
-                // Use fallback response
-                const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-                const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
-                  <Response>
-                    <Speak voice="Polly.Joanna">${fallbackResponse}</Speak>
-                  </Response>`;
-                
-                if (plivoWs.readyState === WebSocket.OPEN) {
-                  plivoWs.send(JSON.stringify({
-                    event: 'speak',
-                    payload: ttsResponse
-                  }));
+                  if (!response.ok) {
+                    throw new Error(`Hugging Face API error: ${response.status}`);
+                  }
+
+                  const result = await response.json();
+                  aiResponse = result[0]?.generated_text;
+                  if (aiResponse) break;
+                  
+                  retryCount++;
+                } catch (error) {
+                  console.error(`❌ Hugging Face API error (attempt ${retryCount + 1}):`, error);
+                  retryCount++;
+                  if (retryCount === maxRetries) {
+                    throw error;
+                  }
+                  await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
                 }
+              }
+
+              if (!aiResponse) {
+                throw new Error('No response from Hugging Face API');
+              }
+
+              console.log("🤖 AI Response:", aiResponse);
+              
+              // Format and send TTS response
+              const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
+                <Response>
+                  <Speak voice="Polly.Joanna">${aiResponse}</Speak>
+                </Response>`;
+              
+              if (plivoWs.readyState === WebSocket.OPEN) {
+                plivoWs.send(JSON.stringify({
+                  event: 'speak',
+                  payload: ttsResponse
+                }));
+              }
+
+              // Store in database
+              try {
+                await supabase.from('conversation_turns').insert([{
+                  call_id: callId,
+                  user_message: fullUtterance,
+                  ai_response: aiResponse,
+                  is_hugging_face: true,
+                  timestamp: new Date().toISOString()
+                }]);
+              } catch (dbError) {
+                console.error('❌ Database error:', dbError);
+              }
+
+            } catch (error) {
+              console.error("❌ Error in AI response:", error);
+              // Use fallback response
+              const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+              const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
+                <Response>
+                  <Speak voice="Polly.Joanna">${fallbackResponse}</Speak>
+                </Response>`;
+              
+              if (plivoWs.readyState === WebSocket.OPEN) {
+                plivoWs.send(JSON.stringify({
+                  event: 'speak',
+                  payload: ttsResponse
+                }));
               }
             }
           }
@@ -702,10 +718,10 @@ app.ws('/listen', async (plivoWs, req) => {
         try {
           await supabase.from('transcripts').insert([{
             call_id: callId,
-            transcript: spokenText,
+            transcript: transcript,
             timestamp: new Date().toISOString(),
             is_processed: true,
-            confidence: confidence
+            confidence: parsed.channel.alternatives[0].confidence
           }]);
         } catch (error) {
           console.error('❌ Supabase insert error:', error);
