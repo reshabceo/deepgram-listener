@@ -6,6 +6,7 @@ const WebSocket = require('ws');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const OpenAI = require('openai');
+const fetch = require('node-fetch');
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -33,6 +34,8 @@ const MAX_REQUESTS_PER_WINDOW = 50;
 const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 1000; // 1 second
+const USE_HUGGING_FACE = true; // Switch to use Hugging Face instead of OpenAI
+const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill";
 
 // Initialize OpenAI
 const openai = new OpenAI({
@@ -52,6 +55,18 @@ const supabase = createClient(
     }
   }
 );
+
+// Add after the OpenAI initialization
+const FALLBACK_RESPONSES = [
+  "I'm listening. Please continue.",
+  "I understand. Go on.",
+  "Could you tell me more about that?",
+  "I'm here to help. What else would you like to share?",
+  "I'm following. Please continue.",
+  "That's interesting. Would you like to elaborate?",
+  "I see. What are your thoughts on that?",
+  "Thank you for sharing. Would you like to continue?",
+];
 
 // Conversation context management
 class ConversationManager {
@@ -276,15 +291,53 @@ async function generateAIResponse(callId, userMessage) {
       content: userMessage
     });
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: context.messages,
-      temperature: 0.7,
-      max_tokens: 100,  // Reduced from 150 to save on token usage
-      presence_penalty: 0.6
-    });
+    let aiResponse;
+    
+    if (USE_HUGGING_FACE) {
+      try {
+        console.log("🤖 Using Hugging Face for response generation");
+        const response = await fetch(HUGGING_FACE_API_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            inputs: userMessage,
+            options: {
+              wait_for_model: true,
+              max_length: 100
+            }
+          }),
+        });
 
-    const aiResponse = completion.choices[0].message;
+        if (!response.ok) {
+          throw new Error(`Hugging Face API error: ${response.status}`);
+        }
+
+        const result = await response.json();
+        aiResponse = result[0]?.generated_text || "I'm not sure how to respond to that.";
+        console.log("🤖 Hugging Face response:", aiResponse);
+      } catch (error) {
+        console.error("❌ Hugging Face API error:", error);
+        // Use fallback if Hugging Face fails
+        aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+      }
+    } else {
+      try {
+        const completion = await openai.chat.completions.create({
+          model: "gpt-3.5-turbo",
+          messages: context.messages,
+          temperature: 0.7,
+          max_tokens: 100,
+          presence_penalty: 0.6
+        });
+        aiResponse = completion.choices[0].message.content;
+      } catch (error) {
+        console.error('❌ OpenAI API error:', error);
+        aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+      }
+    }
+
     const responseTime = Date.now() - startTime;
     
     // Update metrics
@@ -293,39 +346,26 @@ async function generateAIResponse(callId, userMessage) {
     // Add AI response to context
     await conversationManager.updateContext(callId, {
       role: "assistant",
-      content: aiResponse.content
+      content: aiResponse
     });
 
     try {
-      // Store in conversation_turns
       await supabase.from('conversation_turns').insert([{
         call_id: callId,
         user_message: userMessage,
-        ai_response: aiResponse.content,
+        ai_response: aiResponse,
+        is_hugging_face: USE_HUGGING_FACE,
         timestamp: new Date().toISOString()
       }]);
     } catch (dbError) {
-      // Log but don't fail if database insert fails
       console.error('❌ Failed to store conversation turn:', dbError);
     }
 
-    return aiResponse.content;
+    return aiResponse;
 
   } catch (error) {
-    console.error('❌ OpenAI API error:', error);
-    
-    // Check for specific error types
-    if (error.status === 429 || (error.error && error.error.type === 'insufficient_quota')) {
-      console.log('⚠️ OpenAI rate limit or quota exceeded');
-      return "I apologize, but I'm experiencing high traffic at the moment. Could you please try again in a few moments?";
-    }
-    
-    if (error.status === 401 || error.status === 403) {
-      console.error('❌ OpenAI authentication failed - check API key');
-      return "I'm having trouble accessing my knowledge. Please contact support for assistance.";
-    }
-
-    return "I apologize, but I'm having trouble processing your request. Could you please try again?";
+    console.error('❌ General error in generateAIResponse:', error);
+    return "I apologize, but I'm experiencing technical difficulties. Please try again.";
   }
 }
 
