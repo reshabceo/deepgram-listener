@@ -26,7 +26,8 @@ const app = express();
 const wsInstance = expressWs(app);
 
 const port = process.env.PORT || 3000;
-const WEBSOCKET_PING_INTERVAL = 30000; // 30 seconds
+const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
+const PROCESSING_TIMEOUT = 60000; // 60 seconds
 
 // Initialize OpenAI
 const openai = new OpenAI({
@@ -294,15 +295,16 @@ app.get('/', (req, res) => {
 
 // ✅ Serve Plivo XML
 app.get('/plivo-xml', (req, res) => {
-  const xml = `
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
   <Response>
     <Record 
       action="https://bms123.app.n8n.cloud/webhook/recording"
       redirect="false"
       recordSession="true"
-      maxLength="3600" />
+      maxLength="7200"
+      startOnDialAnswer="true" />
     <Stream 
-      streamTimeout="3600"
+      streamTimeout="7200"
       keepCallAlive="true"
       bidirectional="true"
       contentType="audio/x-mulaw;rate=8000"
@@ -311,12 +313,14 @@ app.get('/plivo-xml', (req, res) => {
     </Stream>
   </Response>`;
   res.set('Content-Type', 'text/xml');
-  res.send(xml.trim());
+  res.send(xml);
 });
 
 // WebSocket listener from Plivo
 app.ws('/listen', (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
+  let keepAliveInterval;
+  let processingTimeout;
   
   // Generate unique call ID
   const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -335,33 +339,57 @@ app.ws('/listen', (plivoWs, req) => {
     }
   });
 
-  // Set up WebSocket ping interval to keep connection alive
-  const pingInterval = setInterval(() => {
+  // Set up keep-alive for both WebSocket connections
+  keepAliveInterval = setInterval(() => {
     if (plivoWs.readyState === WebSocket.OPEN) {
       plivoWs.ping();
+      console.log('🏓 Sent ping to Plivo');
     }
     if (deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.ping();
+      console.log('🏓 Sent ping to Deepgram');
     }
-  }, WEBSOCKET_PING_INTERVAL);
+  }, KEEP_ALIVE_INTERVAL);
+
+  // Reset processing timeout
+  const resetProcessingTimeout = () => {
+    if (processingTimeout) clearTimeout(processingTimeout);
+    processingTimeout = setTimeout(() => {
+      console.log('⏰ Processing timeout - keeping connection alive');
+    }, PROCESSING_TIMEOUT);
+  };
 
   // Handle Deepgram connection
   deepgramWs.on('open', () => {
     console.log('🎙️ Deepgram WebSocket connected');
+    resetProcessingTimeout();
   });
 
   deepgramWs.on('error', (error) => {
     console.error('❌ Deepgram WebSocket error:', error);
   });
 
+  deepgramWs.on('ping', () => {
+    console.log('🏓 Received ping from Deepgram');
+    deepgramWs.pong();
+  });
+
   // Handle Plivo connection
+  plivoWs.on('ping', () => {
+    console.log('🏓 Received ping from Plivo');
+    plivoWs.pong();
+  });
+
   plivoWs.on('error', (error) => {
     console.error('❌ Plivo WebSocket error:', error);
   });
 
   // Clean up function
   const cleanup = async () => {
-    clearInterval(pingInterval);
+    console.log('🧹 Cleaning up connections');
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    if (processingTimeout) clearTimeout(processingTimeout);
+    
     if (deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.close();
     }
@@ -372,11 +400,12 @@ app.ws('/listen', (plivoWs, req) => {
   };
 
   // Handle Plivo messages
-  plivoWs.on('message', (msg) => {
+  plivoWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
       console.log("📥 Received Plivo message:", parsed.event);
-      
+      resetProcessingTimeout();
+
       if (parsed.event === 'media' && parsed.media?.payload) {
         const audioBuffer = Buffer.from(parsed.media.payload, 'base64');
         if (deepgramWs.readyState === WebSocket.OPEN) {
@@ -392,10 +421,22 @@ app.ws('/listen', (plivoWs, req) => {
     }
   });
 
+  // Handle connection closures
+  plivoWs.on('close', (code, reason) => {
+    console.log(`❌ Plivo WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
+    cleanup();
+  });
+
+  deepgramWs.on('close', (code, reason) => {
+    console.log(`❌ Deepgram WebSocket closed. Code: ${code}, Reason: ${reason}`);
+    cleanup();
+  });
+
   // Handle Deepgram messages
   deepgramWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
+      const startTime = Date.now();
 
       if (parsed.channel?.alternatives) {
         const context = conversationManager.getContext(callId);
@@ -415,10 +456,10 @@ app.ws('/listen', (plivoWs, req) => {
 
         console.log("🗣️ Live:", spokenText);
 
+        // Update metrics for user speaking time
+        conversationManager.updateMetrics(callId, 'user_speaking', timeSinceLast);
+
         if (!textUtils.isFiller(spokenText)) {
-          // Update metrics for user speaking time
-          conversationManager.updateMetrics(callId, 'user_speaking', timeSinceLast);
-          
           context.transcriptBuffer += ' ' + spokenText;
           
           if (textUtils.isEndOfThought(spokenText, timeSinceLast)) {
@@ -433,10 +474,12 @@ app.ws('/listen', (plivoWs, req) => {
                 if (aiResponse) {
                   console.log("🤖 AI Response:", aiResponse);
                   
-                  // Format the Speak XML properly
+                  // Format the Speak XML properly with SSML tags
                   const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
                     <Response>
-                      <Speak voice="Polly.Joanna">${aiResponse}</Speak>
+                      <Speak voice="Polly.Joanna">
+                        <prosody rate="95%" pitch="+0%">${aiResponse}</prosody>
+                      </Speak>
                     </Response>`;
                   
                   console.log("🔊 Preparing TTS response:", ttsResponse);
@@ -450,68 +493,41 @@ app.ws('/listen', (plivoWs, req) => {
                     console.log("📤 Sending WebSocket message to Plivo:", JSON.stringify(wsMessage));
                     plivoWs.send(JSON.stringify(wsMessage));
                     console.log("✅ Message sent to Plivo successfully");
+                    
+                    // Update metrics for AI response time
+                    const responseEndTime = Date.now();
+                    conversationManager.updateMetrics(callId, 'ai_response', responseEndTime - startTime);
                   } else {
                     console.error("❌ WebSocket not open for TTS response. State:", plivoWs.readyState);
-                  }
-
-                  // Update metrics for AI response time
-                  const responseEndTime = Date.now();
-                  conversationManager.updateMetrics(callId, 'ai_response', responseEndTime - startTime);
-                  
-                  // Log the conversation turn
-                  try {
-                    await supabase.from('conversation_turns').insert([{
-                      call_id: callId,
-                      user_message: fullUtterance,
-                      ai_response: aiResponse,
-                      timestamp: new Date().toISOString()
-                    }]);
-                    console.log("💾 Stored conversation turn in database");
-                  } catch (error) {
-                    console.error("❌ Failed to store conversation turn:", error);
                   }
                 } else {
                   console.error("❌ No AI response generated");
                 }
               } catch (error) {
-                console.error('❌ Failed to generate AI response:', error);
+                console.error("❌ Error generating AI response:", error);
               }
             }
           }
+        }
 
-          // Store in transcripts
-          try {
-            await supabase.from('transcripts').insert([{
-              call_id: callId,
-              transcript: spokenText,
-              timestamp: new Date().toISOString(),
-              is_processed: true,
-              confidence: confidence
-            }]);
-          } catch (error) {
-            console.error('❌ Supabase insert error:', error);
-          }
-        } else {
-          // Update metrics for silence time
-          conversationManager.updateMetrics(callId, 'silence', timeSinceLast);
+        // Store in transcripts
+        try {
+          await supabase.from('transcripts').insert([{
+            call_id: callId,
+            transcript: spokenText,
+            timestamp: new Date().toISOString(),
+            is_processed: true,
+            confidence: confidence
+          }]);
+        } catch (error) {
+          console.error('❌ Supabase insert error:', error);
         }
       } else if (parsed.type === 'Error') {
         console.error('❌ Deepgram Error:', parsed.description);
       }
-    } catch (e) {
-      console.error('❌ Processing error:', e);
+    } catch (error) {
+      console.error('❌ Error processing Deepgram message:', error);
     }
-  });
-
-  // Handle connection closures
-  plivoWs.on('close', (code, reason) => {
-    console.log(`❌ Plivo WebSocket disconnected. Code: ${code}, Reason: ${reason}`);
-    cleanup();
-  });
-
-  deepgramWs.on('close', () => {
-    console.log('❌ Deepgram WebSocket closed');
-    cleanup();
   });
 });
 
