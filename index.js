@@ -28,6 +28,9 @@ const wsInstance = expressWs(app);
 const port = process.env.PORT || 3000;
 const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
 const PROCESSING_TIMEOUT = 60000; // 60 seconds
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
+const MAX_REQUESTS_PER_WINDOW = 50;
+const requestTimestamps = [];
 
 // Initialize OpenAI
 const openai = new OpenAI({
@@ -59,11 +62,7 @@ class ConversationManager {
     const context = {
       messages: [{
         role: "system",
-        content: `You are a helpful AI assistant on a phone call. 
-                  - Keep responses concise and natural
-                  - Be empathetic and professional
-                  - Ask clarifying questions when needed
-                  - Stay focused on the caller's needs`
+        content: `You are a helpful phone assistant. Keep responses brief and natural. Be professional and focused.`
       }],
       lastProcessedTime: Date.now(),
       transcriptBuffer: '',
@@ -238,6 +237,21 @@ const textUtils = {
   }
 };
 
+// Add rate limiting function
+function checkRateLimit() {
+  const now = Date.now();
+  // Remove timestamps older than the window
+  while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_LIMIT_WINDOW) {
+    requestTimestamps.shift();
+  }
+  // Check if we're under the limit
+  if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
+    requestTimestamps.push(now);
+    return true;
+  }
+  return false;
+}
+
 // Enhanced ChatGPT integration
 async function generateAIResponse(callId, userMessage) {
   const context = conversationManager.getContext(callId);
@@ -246,45 +260,70 @@ async function generateAIResponse(callId, userMessage) {
   const startTime = Date.now();
 
   try {
+    // Check rate limit before making API call
+    if (!checkRateLimit()) {
+      console.log("⚠️ Rate limit reached, using fallback response");
+      return "I apologize, but I'm receiving too many requests right now. Could you please repeat that?";
+    }
+
     // Add user message to context
     await conversationManager.updateContext(callId, {
       role: "user",
       content: userMessage
     });
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: context.messages,
-      temperature: 0.7,
-      max_tokens: 150,
-      presence_penalty: 0.6
-    });
+    try {
+      const completion = await openai.chat.completions.create({
+        model: "gpt-3.5-turbo",
+        messages: context.messages,
+        temperature: 0.7,
+        max_tokens: 100, // Reduced from 150 to save tokens
+        presence_penalty: 0.6
+      });
 
-    const aiResponse = completion.choices[0].message;
-    const responseTime = Date.now() - startTime;
-    
-    // Update metrics
-    conversationManager.updateMetrics(callId, 'response_time', responseTime);
-    
-    // Add AI response to context
-    await conversationManager.updateContext(callId, {
-      role: "assistant",
-      content: aiResponse.content
-    });
+      const aiResponse = completion.choices[0].message;
+      const responseTime = Date.now() - startTime;
+      
+      // Update metrics
+      conversationManager.updateMetrics(callId, 'response_time', responseTime);
+      
+      // Add AI response to context
+      await conversationManager.updateContext(callId, {
+        role: "assistant",
+        content: aiResponse.content
+      });
 
-    // Store in conversation_turns
-    await supabase.from('conversation_turns').insert([{
-      call_id: callId,
-      user_message: userMessage,
-      ai_response: aiResponse.content,
-      timestamp: new Date().toISOString()
-    }]);
+      // Store in conversation_turns
+      try {
+        await supabase.from('conversation_turns').insert([{
+          call_id: callId,
+          user_message: userMessage,
+          ai_response: aiResponse.content,
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (dbError) {
+        console.error('❌ Database error:', dbError);
+        // Continue even if database insert fails
+      }
 
-    return aiResponse.content;
+      return aiResponse.content;
+
+    } catch (openaiError) {
+      console.error('❌ OpenAI API error:', openaiError);
+      
+      // Check for specific error types
+      if (openaiError.error?.type === 'insufficient_quota' || openaiError.status === 429) {
+        console.log("⚠️ OpenAI quota exceeded, using fallback response");
+        return "I apologize, but I'm temporarily unavailable. Could you please try again in a moment?";
+      }
+      
+      // For other errors, use a generic fallback
+      return "I apologize, but I'm having trouble understanding. Could you please rephrase that?";
+    }
 
   } catch (error) {
-    console.error('❌ ChatGPT API error:', error);
-    return null;
+    console.error('❌ General error in generateAIResponse:', error);
+    return "I apologize, but I'm experiencing technical difficulties. Please try again.";
   }
 }
 
@@ -332,12 +371,28 @@ app.ws('/listen', (plivoWs, req) => {
     return;
   });
 
-  // Initialize Deepgram WebSocket
-  const deepgramWs = new WebSocket('wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000', {
-    headers: {
-      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+  // Initialize Deepgram WebSocket with detailed configuration
+  console.log("🎙️ Initializing Deepgram WebSocket");
+  const deepgramConfig = {
+    encoding: 'mulaw',
+    sample_rate: 8000,
+    channels: 1,
+    model: 'nova-2',
+    language: 'en',
+    punctuate: true,
+    interim_results: false,
+    endpointing: true,
+    utterance_end_ms: 1000
+  };
+  
+  const deepgramWs = new WebSocket(
+    `wss://api.deepgram.com/v1/listen?${new URLSearchParams(deepgramConfig).toString()}`,
+    {
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+      }
     }
-  });
+  );
 
   // Set up keep-alive for both WebSocket connections
   keepAliveInterval = setInterval(() => {
@@ -428,53 +483,42 @@ app.ws('/listen', (plivoWs, req) => {
     console.error('Stack:', error.stack);
   });
 
+  // Add Deepgram connection logging
+  deepgramWs.on('open', () => {
+    console.log('🎙️ Deepgram WebSocket connected with config:', deepgramConfig);
+    resetProcessingTimeout();
+  });
+
   deepgramWs.on('error', (error) => {
     console.error('❌ Deepgram WebSocket error:', error.message || error);
-    console.error('Stack:', error.stack);
-  });
-
-  // Add connection close handlers with more detail
-  plivoWs.on('close', (code, reason) => {
-    console.log(`❌ Plivo WebSocket disconnected. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
-    console.log('Current state:', plivoWs.readyState);
-    cleanup();
-  });
-
-  deepgramWs.on('close', (code, reason) => {
-    console.log(`❌ Deepgram WebSocket closed. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
-    console.log('Current state:', deepgramWs.readyState);
-    cleanup();
-  });
-
-  // Handle Deepgram connection
-  deepgramWs.on('open', () => {
-    console.log('🎙️ Deepgram WebSocket connected');
-    resetProcessingTimeout();
-    
-    // Send initial configuration
-    const config = {
-      encoding: 'mulaw',
-      sample_rate: 8000,
-      channels: 1,
-      model: 'nova-2',
-      language: 'en',
-      punctuate: true,
-      interim_results: false
-    };
-    
-    try {
-      deepgramWs.send(JSON.stringify(config));
-      console.log('📝 Sent configuration to Deepgram:', config);
-    } catch (error) {
-      console.error('❌ Failed to send config to Deepgram:', error);
+    if (error.code) {
+      console.error('Error code:', error.code);
+    }
+    if (error.message && error.message.includes('401')) {
+      console.error('❌ Deepgram authentication failed. Check API key.');
     }
   });
 
-  // Enhanced Deepgram message handling
+  // Add Deepgram close handler with detailed status
+  deepgramWs.on('close', (code, reason) => {
+    console.log(`❌ Deepgram WebSocket closed. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
+    console.log('Final state:', deepgramWs.readyState);
+    
+    // Log any pending messages
+    const transcriptBuffer = conversationManager.getContext(callId)?.transcriptBuffer;
+    if (transcriptBuffer) {
+      console.log('Pending transcript buffer:', transcriptBuffer);
+    }
+    
+    cleanup();
+  });
+
+  // Handle Deepgram messages
   deepgramWs.on('message', async (msg) => {
     try {
+      console.log("🎙️ Raw Deepgram message received");
       const parsed = JSON.parse(msg.toString());
-      console.log("📥 Received Deepgram message type:", parsed.type || 'unknown');
+      console.log("📥 Parsed Deepgram message:", JSON.stringify(parsed, null, 2));
       
       const startTime = Date.now();
 
@@ -492,8 +536,22 @@ app.ws('/listen', (plivoWs, req) => {
         const spokenText = parsed.channel.alternatives[0].transcript;
         const confidence = parsed.channel.alternatives[0].confidence;
         
+        console.log("🔍 Transcript Analysis:", {
+          text: spokenText,
+          confidence: confidence,
+          length: spokenText ? spokenText.length : 0,
+          isFillerWord: textUtils.isFiller(spokenText),
+          bufferLength: context.transcriptBuffer.length
+        });
+
         if (!spokenText) {
           console.log("ℹ️ Empty transcript received");
+          return;
+        }
+
+        // Only process high-confidence transcriptions
+        if (confidence < 0.7) {
+          console.log("ℹ️ Low confidence transcript ignored:", confidence);
           return;
         }
 
@@ -508,19 +566,22 @@ app.ws('/listen', (plivoWs, req) => {
 
         if (!textUtils.isFiller(spokenText)) {
           context.transcriptBuffer += ' ' + spokenText;
+          console.log("📝 Current buffer:", context.transcriptBuffer);
           
-          if (textUtils.isEndOfThought(spokenText, timeSinceLast)) {
+          // Only process if we have a substantial utterance
+          if (textUtils.isEndOfThought(spokenText, timeSinceLast) && 
+              context.transcriptBuffer.length >= 10) {
             const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
+            console.log("✨ Processing complete utterance:", fullUtterance);
             context.transcriptBuffer = '';
 
             if (textUtils.hasMinimumQuality(fullUtterance)) {
-              console.log("🤖 Processing utterance:", fullUtterance);
-              
+              console.log("🤖 Sending to OpenAI:", fullUtterance);
               try {
                 const aiResponse = await generateAIResponse(callId, fullUtterance);
+                console.log("🤖 OpenAI Response:", aiResponse);
+                
                 if (aiResponse) {
-                  console.log("🤖 AI Response:", aiResponse);
-                  
                   // Format the Speak XML properly with SSML tags
                   const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
                     <Response>
@@ -529,7 +590,7 @@ app.ws('/listen', (plivoWs, req) => {
                       </Speak>
                     </Response>`;
                   
-                  console.log("🔊 Preparing TTS response:", ttsResponse);
+                  console.log("🔊 Preparing TTS response");
                   
                   // Send the TTS response back through the WebSocket
                   if (plivoWs.readyState === WebSocket.OPEN) {
@@ -537,9 +598,9 @@ app.ws('/listen', (plivoWs, req) => {
                       event: 'speak',
                       payload: ttsResponse
                     };
-                    console.log("📤 Sending WebSocket message to Plivo:", JSON.stringify(wsMessage));
+                    console.log("📤 Sending response to Plivo");
                     plivoWs.send(JSON.stringify(wsMessage));
-                    console.log("✅ Message sent to Plivo successfully");
+                    console.log("✅ Response sent successfully");
                     
                     // Update metrics for AI response time
                     const responseEndTime = Date.now();
@@ -551,10 +612,16 @@ app.ws('/listen', (plivoWs, req) => {
                   console.error("❌ No AI response generated");
                 }
               } catch (error) {
-                console.error("❌ Error generating AI response:", error);
+                console.error("❌ Error in AI response flow:", error);
               }
+            } else {
+              console.log("⏭️ Utterance did not meet quality threshold");
             }
+          } else {
+            console.log("⏳ Buffering speech, waiting for end of thought");
           }
+        } else {
+          console.log("⏭️ Filler word detected, skipping");
         }
 
         // Store in transcripts
