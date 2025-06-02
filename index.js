@@ -12,7 +12,7 @@ const requiredEnvVars = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_KEY',
   'DEEPGRAM_API_KEY',
-  'HUGGING_FACE_API_KEY'
+  'OPENAI_API_KEY'
 ];
 
 for (const envVar of requiredEnvVars) {
@@ -271,44 +271,34 @@ const sendTTSResponse = async (ws, text) => {
   try {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
-    const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
+    
+    // Format according to Plivo Speak XML specification
+    const ttsResponse = {
+      event: 'speak',
+      payload: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
-</Response>`;
+    <Speak voice="WOMAN" language="en-US">${cleanText}</Speak>
+</Response>`
+    };
     
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS XML:", ttsResponse);
+    console.log("📤 Sending TTS message:", ttsResponse);
     
     if (ws.readyState === WebSocket.OPEN) {
-      const message = {
-        event: 'speak',
-        payload: ttsResponse
-      };
-      console.log("📤 Sending message to Plivo:", message);
-      ws.send(JSON.stringify(message));
+      ws.send(JSON.stringify(ttsResponse));
       
       // Add message handler for Plivo responses
-      const messageHandler = (response) => {
+      ws.once('message', (response) => {
         try {
           const parsed = JSON.parse(response.toString());
-          console.log("📥 Plivo response event:", parsed.event);
-          
+          console.log("📥 Plivo response type:", parsed.event);
           if (parsed.event === 'speak') {
-            console.log("🔊 TTS speak event received:", parsed);
-          } else if (parsed.event === 'media') {
-            // Ignore media events as they're for audio streaming
-          } else {
-            console.log("ℹ️ Other Plivo event:", parsed.event);
+            console.log("🔊 TTS speak event received");
           }
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
         }
-      };
-      
-      // Listen for the next few messages to catch the speak response
-      for (let i = 0; i < 5; i++) {
-        ws.once('message', messageHandler);
-      }
+      });
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
@@ -340,35 +330,35 @@ async function generateAIResponse(callId, userMessage) {
     let aiResponse;
     
     try {
-      console.log("🤖 Using Hugging Face for response generation");
-      const response = await fetch(HUGGING_FACE_API_URL, {
-        method: "POST",
+      console.log("🤖 Using OpenAI for response generation");
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
         headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
         },
         body: JSON.stringify({
-          inputs: `<s>[INST] ${userMessage} [/INST]`,
-          parameters: {
-            max_new_tokens: 100,
-            temperature: 0.7,
-            top_p: 0.9,
-            return_full_text: false,
-            do_sample: true
-          }
-        }),
+          model: 'gpt-3.5-turbo',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.7,
+          max_tokens: 100,
+          top_p: 0.9
+        })
       });
 
       if (!response.ok) {
-        throw new Error(`Hugging Face API error: ${response.status} - ${await response.text()}`);
+        throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
       }
 
       const result = await response.json();
-      aiResponse = result[0]?.generated_text || FALLBACK_RESPONSES[0];
-      console.log("🤖 Hugging Face response:", aiResponse);
+      aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
+      console.log("🤖 OpenAI response:", aiResponse);
     } catch (error) {
-      console.error("❌ Hugging Face API error:", error);
-      // Use fallback if Hugging Face fails
+      console.error("❌ OpenAI API error:", error);
+      // Use fallback if OpenAI fails
       aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
     }
 
@@ -388,7 +378,7 @@ async function generateAIResponse(callId, userMessage) {
         call_id: callId,
         user_message: userMessage,
         ai_response: aiResponse,
-        is_hugging_face: true,
+        is_openai: true,
         timestamp: new Date().toISOString()
       }]);
     } catch (dbError) {
@@ -564,35 +554,32 @@ app.ws('/listen', async (plivoWs, req) => {
                 console.log("🤖 Processing utterance:", fullUtterance);
                 
                 try {
-                  // Call Hugging Face API with proper error handling
-                  console.log("🤖 Calling Hugging Face API...");
-                  const messages = [
-                    { role: "system", content: SYSTEM_PROMPT },
-                    { role: "user", content: fullUtterance }
-                  ];
-                  
-                  const response = await fetch(HUGGING_FACE_API_URL, {
-                    method: "POST",
+                  // Call OpenAI API
+                  console.log("🤖 Calling OpenAI API...");
+                  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
                     headers: {
-                      "Content-Type": "application/json",
-                      "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
                     },
                     body: JSON.stringify({
-                      model: "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
-                      messages: messages,
+                      model: 'gpt-3.5-turbo',
+                      messages: [
+                        { role: 'system', content: SYSTEM_PROMPT },
+                        { role: 'user', content: fullUtterance }
+                      ],
                       temperature: 0.7,
                       max_tokens: 100,
-                      top_p: 0.9,
-                      stream: false
-                    }),
+                      top_p: 0.9
+                    })
                   });
 
                   if (!response.ok) {
-                    throw new Error(`Hugging Face API error: ${response.status} - ${await response.text()}`);
+                    throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
                   }
 
                   const result = await response.json();
-                  const aiResponse = result.choices?.[0]?.message?.content || FALLBACK_RESPONSES[0];
+                  const aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
                   console.log("🤖 AI Response:", aiResponse);
                   
                   // Use the sendTTSResponse function
@@ -603,12 +590,12 @@ app.ws('/listen', async (plivoWs, req) => {
                     call_id: callId,
                     user_message: fullUtterance,
                     ai_response: aiResponse,
-                    is_hugging_face: true,
+                    is_openai: true,
                     timestamp: new Date().toISOString()
                   }]);
 
                 } catch (error) {
-                  console.error("❌ Hugging Face API error:", error);
+                  console.error("❌ OpenAI API error:", error);
                   // Use fallback response with better context
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
                   console.log("⚠️ Using fallback response:", fallbackResponse);
