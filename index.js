@@ -53,14 +53,14 @@ const supabase = createClient(
 
 // Add after the OpenAI initialization
 const FALLBACK_RESPONSES = [
-  "I'm listening. Please continue.",
-  "I understand. Go on.",
-  "Could you tell me more about that?",
-  "I'm here to help. What else would you like to share?",
-  "I'm following. Please continue.",
-  "That's interesting. Would you like to elaborate?",
-  "I see. What are your thoughts on that?",
-  "Thank you for sharing. Would you like to continue?",
+  "I hear you.",
+  "Please continue.",
+  "I'm listening.",
+  "Go ahead.",
+  "Yes, I'm here.",
+  "Tell me more.",
+  "I understand.",
+  "Please proceed."
 ];
 
 // Conversation context management
@@ -272,33 +272,50 @@ const sendTTSResponse = async (ws, text) => {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
     
-    // Format according to Plivo Speak XML specification
+    // Format with additional parameters for better audio delivery
     const ttsResponse = {
       event: 'speak',
-      payload: `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Speak voice="WOMAN" language="en-US">${cleanText}</Speak>
-</Response>`
+      payload: {
+        text: cleanText,
+        voice: 'Polly.Joanna',
+        language: 'en-US',
+        format: 'audio/wav',
+        options: {
+          pitch: '1.0',
+          rate: '1.0',
+          volume: '1.0'
+        }
+      }
     };
     
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📤 Sending TTS message:", ttsResponse);
+    console.log("📤 Sending TTS message:", JSON.stringify(ttsResponse, null, 2));
     
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(ttsResponse));
       
       // Add message handler for Plivo responses
-      ws.once('message', (response) => {
+      const messageHandler = (response) => {
         try {
           const parsed = JSON.parse(response.toString());
-          console.log("📥 Plivo response type:", parsed.event);
+          console.log("📥 Plivo response:", parsed);
+          
           if (parsed.event === 'speak') {
             console.log("🔊 TTS speak event received");
+          } else if (parsed.event === 'media') {
+            console.log("🎵 Media event received");
+          } else if (parsed.event === 'error') {
+            console.error("❌ Plivo TTS error:", parsed);
           }
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
         }
-      });
+      };
+
+      // Listen for multiple messages to catch all relevant events
+      for (let i = 0; i < 3; i++) {
+        ws.once('message', messageHandler);
+      }
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
