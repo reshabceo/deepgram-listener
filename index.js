@@ -36,6 +36,9 @@ const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
 const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-Small-3.1-24B-Instruct-2503";
 
+// Update the system prompt to be more focused
+const SYSTEM_PROMPT = `You are a helpful phone assistant. Keep responses brief, natural, and focused. You should be professional but conversational.`;
+
 // Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -563,6 +566,11 @@ app.ws('/listen', async (plivoWs, req) => {
                 try {
                   // Call Hugging Face API with proper error handling
                   console.log("🤖 Calling Hugging Face API...");
+                  const messages = [
+                    { role: "system", content: SYSTEM_PROMPT },
+                    { role: "user", content: fullUtterance }
+                  ];
+                  
                   const response = await fetch(HUGGING_FACE_API_URL, {
                     method: "POST",
                     headers: {
@@ -570,14 +578,12 @@ app.ws('/listen', async (plivoWs, req) => {
                       "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
                     },
                     body: JSON.stringify({
-                      inputs: `<s>[INST] ${fullUtterance} [/INST]`,
-                      parameters: {
-                        max_new_tokens: 100,
-                        temperature: 0.7,
-                        top_p: 0.9,
-                        return_full_text: false,
-                        do_sample: true
-                      }
+                      model: "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+                      messages: messages,
+                      temperature: 0.7,
+                      max_tokens: 100,
+                      top_p: 0.9,
+                      stream: false
                     }),
                   });
 
@@ -586,10 +592,10 @@ app.ws('/listen', async (plivoWs, req) => {
                   }
 
                   const result = await response.json();
-                  const aiResponse = result[0]?.generated_text || FALLBACK_RESPONSES[0];
+                  const aiResponse = result.choices?.[0]?.message?.content || FALLBACK_RESPONSES[0];
                   console.log("🤖 AI Response:", aiResponse);
                   
-                  // Use the new sendTTSResponse function
+                  // Use the sendTTSResponse function
                   await sendTTSResponse(plivoWs, aiResponse);
 
                   // Store in database
@@ -607,7 +613,6 @@ app.ws('/listen', async (plivoWs, req) => {
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
                   console.log("⚠️ Using fallback response:", fallbackResponse);
                   
-                  // Use the new sendTTSResponse function for fallback
                   await sendTTSResponse(plivoWs, fallbackResponse);
                 }
               }
