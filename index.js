@@ -34,7 +34,7 @@ const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
-const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2";
+const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/microsoft/phi-2";
 
 // Supabase client
 const supabase = createClient(
@@ -266,19 +266,35 @@ function checkRateLimit() {
 // Update the TTS response format and add error handling
 const sendTTSResponse = async (ws, text) => {
   try {
+    // Clean and format the text for TTS
+    const cleanText = text.replace(/[<>]/g, '').trim();
     const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Speak language="en-US" voice="Polly.Joanna">${text}</Speak>
+    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
 </Response>`;
     
+    console.log("🎯 WebSocket State:", ws.readyState);
+    console.log("📝 TTS XML:", ttsResponse);
+    
     if (ws.readyState === WebSocket.OPEN) {
-      console.log("🔊 Sending TTS response:", text);
-      ws.send(JSON.stringify({
+      const message = {
         event: 'speak',
         payload: ttsResponse
-      }));
+      };
+      console.log("📤 Sending message to Plivo:", message);
+      ws.send(JSON.stringify(message));
+      
+      // Add message handler for Plivo responses
+      ws.once('message', (response) => {
+        try {
+          const parsed = JSON.parse(response.toString());
+          console.log("📥 Plivo response:", parsed);
+        } catch (err) {
+          console.error("❌ Error parsing Plivo response:", err);
+        }
+      });
     } else {
-      console.error("❌ WebSocket not open for TTS response");
+      throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
   } catch (error) {
     console.error("❌ Error sending TTS response:", error);
@@ -316,10 +332,7 @@ async function generateAIResponse(callId, userMessage) {
           "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
         },
         body: JSON.stringify({
-          inputs: [{
-            role: "user",
-            content: userMessage
-          }],
+          inputs: userMessage,
           parameters: {
             max_new_tokens: 100,
             temperature: 0.7,
@@ -543,10 +556,7 @@ app.ws('/listen', async (plivoWs, req) => {
                       "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
                     },
                     body: JSON.stringify({
-                      inputs: [{
-                        role: "user",
-                        content: fullUtterance
-                      }],
+                      inputs: userMessage,
                       parameters: {
                         max_new_tokens: 100,
                         temperature: 0.7,
