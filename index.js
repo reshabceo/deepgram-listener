@@ -34,7 +34,7 @@ const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
-const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill";
+const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2";
 
 // Supabase client
 const supabase = createClient(
@@ -263,6 +263,28 @@ function checkRateLimit() {
   return false;
 }
 
+// Update the TTS response format and add error handling
+const sendTTSResponse = async (ws, text) => {
+  try {
+    const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Speak language="en-US" voice="Polly.Joanna">${text}</Speak>
+</Response>`;
+    
+    if (ws.readyState === WebSocket.OPEN) {
+      console.log("🔊 Sending TTS response:", text);
+      ws.send(JSON.stringify({
+        event: 'speak',
+        payload: ttsResponse
+      }));
+    } else {
+      console.error("❌ WebSocket not open for TTS response");
+    }
+  } catch (error) {
+    console.error("❌ Error sending TTS response:", error);
+  }
+};
+
 // Enhanced ChatGPT integration
 async function generateAIResponse(callId, userMessage) {
   const context = conversationManager.getContext(callId);
@@ -294,12 +316,15 @@ async function generateAIResponse(callId, userMessage) {
           "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
         },
         body: JSON.stringify({
-          inputs: userMessage,
+          inputs: [{
+            role: "user",
+            content: userMessage
+          }],
           parameters: {
-            max_length: 100,
+            max_new_tokens: 100,
             temperature: 0.7,
             top_p: 0.9,
-            do_sample: true
+            return_full_text: false
           }
         }),
       });
@@ -518,12 +543,15 @@ app.ws('/listen', async (plivoWs, req) => {
                       "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
                     },
                     body: JSON.stringify({
-                      inputs: fullUtterance,
+                      inputs: [{
+                        role: "user",
+                        content: fullUtterance
+                      }],
                       parameters: {
-                        max_length: 100,
+                        max_new_tokens: 100,
                         temperature: 0.7,
                         top_p: 0.9,
-                        do_sample: true
+                        return_full_text: false
                       }
                     }),
                   });
@@ -536,18 +564,8 @@ app.ws('/listen', async (plivoWs, req) => {
                   const aiResponse = result[0]?.generated_text || FALLBACK_RESPONSES[0];
                   console.log("🤖 AI Response:", aiResponse);
                   
-                  // Send TTS response
-                  const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
-                    <Response>
-                      <Speak voice="Polly.Joanna">${aiResponse}</Speak>
-                    </Response>`;
-                  
-                  if (plivoWs.readyState === WebSocket.OPEN) {
-                    plivoWs.send(JSON.stringify({
-                      event: 'speak',
-                      payload: ttsResponse
-                    }));
-                  }
+                  // Use the new sendTTSResponse function
+                  await sendTTSResponse(plivoWs, aiResponse);
 
                   // Store in database
                   await supabase.from('conversation_turns').insert([{
@@ -564,17 +582,8 @@ app.ws('/listen', async (plivoWs, req) => {
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
                   console.log("⚠️ Using fallback response:", fallbackResponse);
                   
-                  const ttsResponse = `<?xml version="1.0" encoding="UTF-8"?>
-                    <Response>
-                      <Speak voice="Polly.Joanna">${fallbackResponse}</Speak>
-                    </Response>`;
-                  
-                  if (plivoWs.readyState === WebSocket.OPEN) {
-                    plivoWs.send(JSON.stringify({
-                      event: 'speak',
-                      payload: ttsResponse
-                    }));
-                  }
+                  // Use the new sendTTSResponse function for fallback
+                  await sendTTSResponse(plivoWs, fallbackResponse);
                 }
               }
             }
