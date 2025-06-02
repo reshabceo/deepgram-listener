@@ -11,7 +11,8 @@ const fetch = require('node-fetch');
 const requiredEnvVars = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_KEY',
-  'DEEPGRAM_API_KEY'
+  'DEEPGRAM_API_KEY',
+  'HUGGING_FACE_API_KEY'
 ];
 
 for (const envVar of requiredEnvVars) {
@@ -289,7 +290,8 @@ async function generateAIResponse(callId, userMessage) {
       const response = await fetch(HUGGING_FACE_API_URL, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
         },
         body: JSON.stringify({
           inputs: userMessage,
@@ -512,7 +514,8 @@ app.ws('/listen', async (plivoWs, req) => {
                   const response = await fetch(HUGGING_FACE_API_URL, {
                     method: "POST",
                     headers: {
-                      "Content-Type": "application/json"
+                      "Content-Type": "application/json",
+                      "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
                     },
                     body: JSON.stringify({
                       inputs: fullUtterance,
