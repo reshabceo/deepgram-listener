@@ -34,7 +34,7 @@ const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
-const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/microsoft/phi-2";
+const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-Small-3.1-24B-Instruct-2503";
 
 // Supabase client
 const supabase = createClient(
@@ -285,14 +285,27 @@ const sendTTSResponse = async (ws, text) => {
       ws.send(JSON.stringify(message));
       
       // Add message handler for Plivo responses
-      ws.once('message', (response) => {
+      const messageHandler = (response) => {
         try {
           const parsed = JSON.parse(response.toString());
-          console.log("📥 Plivo response:", parsed);
+          console.log("📥 Plivo response event:", parsed.event);
+          
+          if (parsed.event === 'speak') {
+            console.log("🔊 TTS speak event received:", parsed);
+          } else if (parsed.event === 'media') {
+            // Ignore media events as they're for audio streaming
+          } else {
+            console.log("ℹ️ Other Plivo event:", parsed.event);
+          }
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
         }
-      });
+      };
+      
+      // Listen for the next few messages to catch the speak response
+      for (let i = 0; i < 5; i++) {
+        ws.once('message', messageHandler);
+      }
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
@@ -332,12 +345,13 @@ async function generateAIResponse(callId, userMessage) {
           "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
         },
         body: JSON.stringify({
-          inputs: userMessage,
+          inputs: `<s>[INST] ${userMessage} [/INST]`,
           parameters: {
             max_new_tokens: 100,
             temperature: 0.7,
             top_p: 0.9,
-            return_full_text: false
+            return_full_text: false,
+            do_sample: true
           }
         }),
       });
@@ -556,12 +570,13 @@ app.ws('/listen', async (plivoWs, req) => {
                       "Authorization": `Bearer ${process.env.HUGGING_FACE_API_KEY}`
                     },
                     body: JSON.stringify({
-                      inputs: userMessage,
+                      inputs: `<s>[INST] ${fullUtterance} [/INST]`,
                       parameters: {
                         max_new_tokens: 100,
                         temperature: 0.7,
                         top_p: 0.9,
-                        return_full_text: false
+                        return_full_text: false,
+                        do_sample: true
                       }
                     }),
                   });
@@ -588,7 +603,7 @@ app.ws('/listen', async (plivoWs, req) => {
 
                 } catch (error) {
                   console.error("❌ Hugging Face API error:", error);
-                  // Use fallback response
+                  // Use fallback response with better context
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
                   console.log("⚠️ Using fallback response:", fallbackResponse);
                   
