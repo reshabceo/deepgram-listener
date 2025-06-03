@@ -318,9 +318,11 @@ app.all('/plivo-xml', (req, res) => {
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
 
+  // Make sure Plivo knows this is XML:
   res.set('Content-Type', 'application/xml');
   res.send(xml);
 });
+
 
 // Deepgram WebSocket config
 const DEEPGRAM_CONFIG = {
