@@ -34,7 +34,6 @@ const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
-const HUGGING_FACE_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-Small-3.1-24B-Instruct-2503";
 
 // Update the system prompt to be more focused
 const SYSTEM_PROMPT = `You are a helpful phone assistant. Keep responses brief, natural, and focused. You should be professional but conversational.`;
@@ -51,16 +50,16 @@ const supabase = createClient(
   }
 );
 
-// Add after the OpenAI initialization
+// Update FALLBACK_RESPONSES to be even shorter for testing
 const FALLBACK_RESPONSES = [
+  "Hello.",
+  "Yes.",
   "I hear you.",
-  "Please continue.",
-  "I'm listening.",
   "Go ahead.",
-  "Yes, I'm here.",
-  "Tell me more.",
+  "Please continue.",
   "I understand.",
-  "Please proceed."
+  "Tell me more.",
+  "I'm listening."
 ];
 
 // Conversation context management
@@ -272,50 +271,61 @@ const sendTTSResponse = async (ws, text) => {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
     
-    // Format with additional parameters for better audio delivery
-    const ttsResponse = {
-      event: 'speak',
-      payload: {
-        text: cleanText,
-        voice: 'Polly.Joanna',
-        language: 'en-US',
-        format: 'audio/wav',
-        options: {
-          pitch: '1.0',
-          rate: '1.0',
-          volume: '1.0'
-        }
-      }
+    // First send a start speak command
+    const startSpeak = {
+      command: 'startSpeak',
+      text: cleanText
     };
     
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📤 Sending TTS message:", JSON.stringify(ttsResponse, null, 2));
+    console.log("📤 Sending startSpeak command:", JSON.stringify(startSpeak, null, 2));
     
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(ttsResponse));
+      // Send the speak command
+      ws.send(JSON.stringify(startSpeak));
       
       // Add message handler for Plivo responses
       const messageHandler = (response) => {
         try {
           const parsed = JSON.parse(response.toString());
-          console.log("📥 Plivo response:", parsed);
+          console.log("📥 Plivo event received:", parsed.event);
           
-          if (parsed.event === 'speak') {
-            console.log("🔊 TTS speak event received");
-          } else if (parsed.event === 'media') {
-            console.log("🎵 Media event received");
-          } else if (parsed.event === 'error') {
-            console.error("❌ Plivo TTS error:", parsed);
+          switch(parsed.event) {
+            case 'speakStarted':
+              console.log("🔊 TTS started");
+              break;
+            case 'speakCompleted':
+              console.log("✅ TTS completed");
+              break;
+            case 'speakFailed':
+              console.error("❌ TTS failed:", parsed);
+              break;
+            case 'media':
+              console.log("🎵 Media chunk received");
+              break;
+            default:
+              console.log("ℹ️ Other event:", parsed.event);
           }
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
+          console.error("Raw response:", response.toString());
         }
       };
 
-      // Listen for multiple messages to catch all relevant events
-      for (let i = 0; i < 3; i++) {
+      // Listen for events until we get completion or failure
+      let eventCount = 0;
+      const maxEvents = 10;
+      const eventInterval = setInterval(() => {
+        if (eventCount >= maxEvents) {
+          clearInterval(eventInterval);
+          return;
+        }
         ws.once('message', messageHandler);
-      }
+        eventCount++;
+      }, 500);
+
+      // Clear interval after 5 seconds
+      setTimeout(() => clearInterval(eventInterval), 5000);
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
@@ -344,10 +354,8 @@ async function generateAIResponse(callId, userMessage) {
       content: userMessage
     });
 
-    let aiResponse;
-    
     try {
-      console.log("🤖 Using OpenAI for response generation");
+      console.log("🤖 Calling OpenAI API...");
       const response = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -371,38 +379,38 @@ async function generateAIResponse(callId, userMessage) {
       }
 
       const result = await response.json();
-      aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
-      console.log("🤖 OpenAI response:", aiResponse);
+      const aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
+      console.log("🤖 AI Response:", aiResponse);
+
+      const responseTime = Date.now() - startTime;
+      
+      // Update metrics
+      conversationManager.updateMetrics(callId, 'response_time', responseTime);
+      
+      // Add AI response to context
+      await conversationManager.updateContext(callId, {
+        role: "assistant",
+        content: aiResponse
+      });
+
+      try {
+        await supabase.from('conversation_turns').insert([{
+          call_id: callId,
+          user_message: userMessage,
+          ai_response: aiResponse,
+          is_openai: true,
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (dbError) {
+        console.error('❌ Failed to store conversation turn:', dbError);
+      }
+
+      return aiResponse;
+
     } catch (error) {
-      console.error("❌ OpenAI API error:", error);
-      // Use fallback if OpenAI fails
-      aiResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+      console.error('❌ OpenAI API error:', error);
+      return FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
     }
-
-    const responseTime = Date.now() - startTime;
-    
-    // Update metrics
-    conversationManager.updateMetrics(callId, 'response_time', responseTime);
-    
-    // Add AI response to context
-    await conversationManager.updateContext(callId, {
-      role: "assistant",
-      content: aiResponse
-    });
-
-    try {
-      await supabase.from('conversation_turns').insert([{
-        call_id: callId,
-        user_message: userMessage,
-        ai_response: aiResponse,
-        is_openai: true,
-        timestamp: new Date().toISOString()
-      }]);
-    } catch (dbError) {
-      console.error('❌ Failed to store conversation turn:', dbError);
-    }
-
-    return aiResponse;
 
   } catch (error) {
     console.error('❌ General error in generateAIResponse:', error);
@@ -571,49 +579,16 @@ app.ws('/listen', async (plivoWs, req) => {
                 console.log("🤖 Processing utterance:", fullUtterance);
                 
                 try {
-                  // Call OpenAI API
-                  console.log("🤖 Calling OpenAI API...");
-                  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-                    },
-                    body: JSON.stringify({
-                      model: 'gpt-3.5-turbo',
-                      messages: [
-                        { role: 'system', content: SYSTEM_PROMPT },
-                        { role: 'user', content: fullUtterance }
-                      ],
-                      temperature: 0.7,
-                      max_tokens: 100,
-                      top_p: 0.9
-                    })
-                  });
-
-                  if (!response.ok) {
-                    throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
-                  }
-
-                  const result = await response.json();
-                  const aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
+                  // Generate AI response
+                  const aiResponse = await generateAIResponse(callId, fullUtterance);
                   console.log("🤖 AI Response:", aiResponse);
                   
                   // Use the sendTTSResponse function
                   await sendTTSResponse(plivoWs, aiResponse);
 
-                  // Store in database
-                  await supabase.from('conversation_turns').insert([{
-                    call_id: callId,
-                    user_message: fullUtterance,
-                    ai_response: aiResponse,
-                    is_openai: true,
-                    timestamp: new Date().toISOString()
-                  }]);
-
                 } catch (error) {
-                  console.error("❌ OpenAI API error:", error);
-                  // Use fallback response with better context
+                  console.error("❌ AI/TTS error:", error);
+                  // Use fallback response
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
                   console.log("⚠️ Using fallback response:", fallbackResponse);
                   
