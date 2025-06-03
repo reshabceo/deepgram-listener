@@ -272,18 +272,11 @@ const sendTTSResponse = async (ws, text) => {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
     
-    // Create Plivo Response with SSML
-    const r = new plivo.Response();
-    const speakElem = r.addSpeak('', {
-      'voice': 'Polly.Joanna',
-      'language': 'en-US'
-    });
-    
-    // Add prosody for better speech control
-    speakElem.addText(`<prosody rate="medium">${cleanText}</prosody>`);
-    
-    // Convert to XML
-    const ttsXml = r.toXML();
+    // Create simple Plivo Response XML
+    const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
+</Response>`;
     
     // Format the speak event
     const speakEvent = {
@@ -308,6 +301,8 @@ const sendTTSResponse = async (ws, text) => {
             console.log("🎵 Media chunk received");
           } else if (parsed.event === 'speak') {
             console.log("🔊 Speak event received:", parsed);
+          } else if (parsed.event === 'error') {
+            console.error("❌ TTS error:", parsed);
           } else {
             console.log("📥 Other Plivo event:", parsed.event);
           }
