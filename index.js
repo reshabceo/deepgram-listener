@@ -427,8 +427,7 @@ app.all('/plivo-xml', (req, res) => {
     keepCallAlive="true"
     bidirectional="true"
     contentType="audio/x-mulaw;rate=8000"
-    audioTrack="both"
-    streamType="voice"
+    track="inbound"
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status">
     wss://triumphant-victory-production.up.railway.app/listen
   </Stream>
