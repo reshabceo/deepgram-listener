@@ -309,15 +309,16 @@ app.all('/plivo-xml', (req, res) => {
     recordSession="true"
     maxLength="3600" />
   <Stream
-    url="wss://triumphant-victory-production.up.railway.app/listen"
+    serviceUrl="wss://triumphant-victory-production.up.railway.app/listen"
     transport="websocket"
     track="both"
     encoding="mulaw"
     sampleRate="8000"
+    keepCallAlive="true"
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
 
-  res.set('Content-Type', 'text/xml');
+  res.set('Content-Type', 'application/xml');
   res.send(xml);
 });
 
