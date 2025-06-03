@@ -272,16 +272,17 @@ const sendTTSResponse = async (ws, text) => {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
     
-    // Create simple Plivo Response XML
+    // Create Plivo Response XML with speak attributes
     const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
+    <Speak voice="Polly.Joanna" language="en-US" premium="true">${cleanText}</Speak>
 </Response>`;
     
     // Format the speak event
     const speakEvent = {
-      event: 'speak',
-      payload: ttsXml
+      event: "speak",
+      payload: ttsXml,
+      content_type: "application/xml"
     };
     
     console.log("🎯 WebSocket State:", ws.readyState);
@@ -293,7 +294,7 @@ const sendTTSResponse = async (ws, text) => {
       ws.send(JSON.stringify(speakEvent));
       
       // Add message handler for Plivo responses
-      const messageHandler = (response) => {
+      ws.on('message', (response) => {
         try {
           const parsed = JSON.parse(response.toString());
           
@@ -310,12 +311,7 @@ const sendTTSResponse = async (ws, text) => {
           console.error("❌ Error parsing Plivo response:", err);
           console.error("Raw response:", response.toString().substring(0, 100));
         }
-      };
-
-      // Listen for multiple messages
-      for (let i = 0; i < 5; i++) {
-        ws.once('message', messageHandler);
-      }
+      });
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
@@ -428,7 +424,9 @@ app.all('/plivo-xml', (req, res) => {
     bidirectional="true"
     contentType="audio/x-mulaw;rate=8000"
     track="inbound"
-    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status">
+    audioTrack="inbound"
+    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status"
+    webSocketUrl="wss://triumphant-victory-production.up.railway.app/listen">
     wss://triumphant-victory-production.up.railway.app/listen
   </Stream>
 </Response>`;
