@@ -266,52 +266,25 @@ function checkRateLimit() {
   return false;
 }
 
-// Update the TTS response format using Plivo SDK
+// Updated TTS response format using Plivo Media Stream (JSON payload)
 const sendTTSResponse = async (ws, text) => {
   try {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
-    
-    // Create Plivo Response XML with speak attributes
-    const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Speak voice="Polly.Joanna" language="en-US" premium="true">${cleanText}</Speak>
-</Response>`;
-    
-    // Format the speak event
+
+    // Build the JSON payload that Plivo’s Media Stream expects:
     const speakEvent = {
       event: "speak",
-      payload: ttsXml,
-      content_type: "application/xml"
+      text: cleanText,
+      voice: "Polly.Joanna",
+      language: "en-US"
     };
-    
+
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS XML:", ttsXml);
-    console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
-    
+    console.log("📝 TTS JSON payload:", JSON.stringify(speakEvent, null, 2));
+
     if (ws.readyState === WebSocket.OPEN) {
-      // Send the speak event
       ws.send(JSON.stringify(speakEvent));
-      
-      // Add message handler for Plivo responses
-      ws.on('message', (response) => {
-        try {
-          const parsed = JSON.parse(response.toString());
-          
-          if (parsed.event === 'media') {
-            console.log("🎵 Media chunk received");
-          } else if (parsed.event === 'speak') {
-            console.log("🔊 Speak event received:", parsed);
-          } else if (parsed.event === 'error') {
-            console.error("❌ TTS error:", parsed);
-          } else {
-            console.log("📥 Other Plivo event:", parsed.event);
-          }
-        } catch (err) {
-          console.error("❌ Error parsing Plivo response:", err);
-          console.error("Raw response:", response.toString().substring(0, 100));
-        }
-      });
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
@@ -426,9 +399,7 @@ app.all('/plivo-xml', (req, res) => {
     track="inbound"
     audioTrack="inbound"
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status"
-    webSocketUrl="wss://triumphant-victory-production.up.railway.app/listen">
-    wss://triumphant-victory-production.up.railway.app/listen
-  </Stream>
+    webSocketUrl="wss://triumphant-victory-production.up.railway.app/listen" />
 </Response>`;
   
   res.set('Content-Type', 'text/xml');
@@ -572,7 +543,7 @@ app.ws('/listen', async (plivoWs, req) => {
                   const aiResponse = await generateAIResponse(callId, fullUtterance);
                   console.log("🤖 AI Response:", aiResponse);
                   
-                  // Use the sendTTSResponse function
+                  // Use the updated sendTTSResponse function
                   await sendTTSResponse(plivoWs, aiResponse);
 
                 } catch (error) {
@@ -659,4 +630,3 @@ process.on('SIGTERM', () => {
 app.listen(port, () => {
   console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
 });
-
