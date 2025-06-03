@@ -6,6 +6,7 @@ const WebSocket = require('ws');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
+const plivo = require('plivo');
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -50,16 +51,16 @@ const supabase = createClient(
   }
 );
 
-// Update FALLBACK_RESPONSES to be even shorter for testing
+// Update FALLBACK_RESPONSES to be clear and natural
 const FALLBACK_RESPONSES = [
-  "Hello.",
-  "Yes.",
-  "I hear you.",
-  "Go ahead.",
-  "Please continue.",
+  "Hello, I can hear you.",
+  "Yes, I'm listening.",
+  "Please go ahead.",
   "I understand.",
+  "Please continue.",
+  "I'm here to help.",
   "Tell me more.",
-  "I'm listening."
+  "I'm following."
 ];
 
 // Conversation context management
@@ -265,67 +266,61 @@ function checkRateLimit() {
   return false;
 }
 
-// Update the TTS response format and add error handling
+// Update the TTS response format using Plivo SDK
 const sendTTSResponse = async (ws, text) => {
   try {
     // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
     
-    // First send a start speak command
-    const startSpeak = {
-      command: 'startSpeak',
-      text: cleanText
+    // Create Plivo Response with SSML
+    const r = new plivo.Response();
+    const speakElem = r.addSpeak('', {
+      'voice': 'Polly.Joanna',
+      'language': 'en-US'
+    });
+    
+    // Add prosody for better speech control
+    speakElem.addText(`<prosody rate="medium">${cleanText}</prosody>`);
+    
+    // Convert to XML
+    const ttsXml = r.toXML();
+    
+    // Format the speak event
+    const speakEvent = {
+      event: 'speak',
+      payload: ttsXml
     };
     
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📤 Sending startSpeak command:", JSON.stringify(startSpeak, null, 2));
+    console.log("📝 TTS XML:", ttsXml);
+    console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
     
     if (ws.readyState === WebSocket.OPEN) {
-      // Send the speak command
-      ws.send(JSON.stringify(startSpeak));
+      // Send the speak event
+      ws.send(JSON.stringify(speakEvent));
       
       // Add message handler for Plivo responses
       const messageHandler = (response) => {
         try {
           const parsed = JSON.parse(response.toString());
-          console.log("📥 Plivo event received:", parsed.event);
           
-          switch(parsed.event) {
-            case 'speakStarted':
-              console.log("🔊 TTS started");
-              break;
-            case 'speakCompleted':
-              console.log("✅ TTS completed");
-              break;
-            case 'speakFailed':
-              console.error("❌ TTS failed:", parsed);
-              break;
-            case 'media':
-              console.log("🎵 Media chunk received");
-              break;
-            default:
-              console.log("ℹ️ Other event:", parsed.event);
+          if (parsed.event === 'media') {
+            console.log("🎵 Media chunk received");
+          } else if (parsed.event === 'speak') {
+            console.log("🔊 Speak event received:", parsed);
+          } else {
+            console.log("📥 Other Plivo event:", parsed.event);
           }
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
-          console.error("Raw response:", response.toString());
+          console.error("Raw response:", response.toString().substring(0, 100));
         }
       };
 
-      // Listen for events until we get completion or failure
-      let eventCount = 0;
-      const maxEvents = 10;
-      const eventInterval = setInterval(() => {
-        if (eventCount >= maxEvents) {
-          clearInterval(eventInterval);
-          return;
-        }
+      // Listen for multiple messages
+      for (let i = 0; i < 5; i++) {
         ws.once('message', messageHandler);
-        eventCount++;
-      }, 500);
-
-      // Clear interval after 5 seconds
-      setTimeout(() => clearInterval(eventInterval), 5000);
+      }
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
