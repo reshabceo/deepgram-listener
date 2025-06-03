@@ -413,25 +413,27 @@ app.get('/', (req, res) => {
   res.send('✅ Deepgram Listener is running');
 });
 
-// ✅ Serve Plivo XML
-app.get('/plivo-xml', (req, res) => {
+// ✅ Serve Plivo XML for both GET and POST
+app.all('/plivo-xml', (req, res) => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
-  <Response>
-    <Record 
-      action="https://bms123.app.n8n.cloud/webhook/recording"
-      redirect="false"
-      recordSession="true"
-      maxLength="7200"
-      startOnDialAnswer="true" />
-    <Stream 
-      streamTimeout="7200"
-      keepCallAlive="true"
-      bidirectional="true"
-      contentType="audio/x-mulaw;rate=8000"
-      statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status">
-      wss://triumphant-victory-production.up.railway.app/listen
-    </Stream>
-  </Response>`;
+<Response>
+  <Record 
+    action="https://bms123.app.n8n.cloud/webhook/recording"
+    redirect="false"
+    recordSession="true"
+    maxLength="3600" />
+  <Stream 
+    streamTimeout="3600"
+    keepCallAlive="true"
+    bidirectional="true"
+    contentType="audio/x-mulaw;rate=8000"
+    audioTrack="both"
+    streamType="voice"
+    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status">
+    wss://triumphant-victory-production.up.railway.app/listen
+  </Stream>
+</Response>`;
+  
   res.set('Content-Type', 'text/xml');
   res.send(xml);
 });
