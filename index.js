@@ -310,10 +310,10 @@ app.all('/plivo-xml', (req, res) => {
     maxLength="3600" />
   <Stream
     url="wss://triumphant-victory-production.up.railway.app/listen"
-    streamTimeout="3600"
-    keepCallAlive="true"
-    bidirectional="true"
-    contentType="audio/x-mulaw;rate=8000"
+    transport="websocket"
+    track="both"
+    encoding="mulaw"
+    sampleRate="8000"
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
 
