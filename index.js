@@ -269,48 +269,48 @@ function checkRateLimit() {
 // Update the TTS response format using Plivo SDK
 const sendTTSResponse = async (ws, text) => {
   try {
-    // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
-    
-    // Create simple Plivo Response XML
     const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
+  <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
 </Response>`;
-    
-    // Format the speak event
+
     const speakEvent = {
       event: 'speak',
-      payload: ttsXml
+      payload: ttsXml,
+      content_type: 'application/xml'
     };
-    
+
     console.log("🎯 WebSocket State:", ws.readyState);
     console.log("📝 TTS XML:", ttsXml);
     console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
-    
+
     if (ws.readyState === WebSocket.OPEN) {
-      // Send the speak event
       ws.send(JSON.stringify(speakEvent));
-      
-      // Add message handler for Plivo responses
-      const messageHandler = (response) => {
+
+      // (Optional) Listen once for Plivo’s ack events
+      ws.once('message', (response) => {
         try {
           const parsed = JSON.parse(response.toString());
-          
-          if (parsed.event === 'media') {
-            console.log("🎵 Media chunk received");
-          } else if (parsed.event === 'speak') {
-            console.log("🔊 Speak event received:", parsed);
+          if (parsed.event === 'speak') {
+            console.log("🔊 Speak event ack received:", parsed);
           } else if (parsed.event === 'error') {
-            console.error("❌ TTS error:", parsed);
-          } else {
-            console.log("📥 Other Plivo event:", parsed.event);
+            console.error("❌ TTS error from Plivo:", parsed);
           }
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
           console.error("Raw response:", response.toString().substring(0, 100));
         }
-      };
+      });
+
+    } else {
+      throw new Error(`WebSocket not open (State: ${ws.readyState})`);
+    }
+  } catch (error) {
+    console.error("❌ Error sending TTS response:", error);
+  }
+};
+
 
       // Listen for multiple messages
       for (let i = 0; i < 5; i++) {
