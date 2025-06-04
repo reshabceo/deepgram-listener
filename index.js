@@ -405,6 +405,7 @@ app.get('/', (req, res) => {
 });
 
 // ✅ Serve Plivo XML for both GET and POST
+// In your index.js (Express) file:
 app.all('/plivo-xml', (req, res) => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -423,7 +424,6 @@ app.all('/plivo-xml', (req, res) => {
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
 
-  // Must send XML so Plivo parses it correctly:
   res.set('Content-Type', 'application/xml; charset=utf-8');
   res.send(xml);
 });
