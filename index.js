@@ -406,7 +406,11 @@ app.get('/', (req, res) => {
 
 // ✅ Serve Plivo XML for both GET and POST
 // In your index.js (Express) file:
+// Somewhere near the bottom of index.js, replace your existing /plivo-xml block with this:
+
 app.all('/plivo-xml', (req, res) => {
+  // Note: we switched `serviceUrl="..."` → `url="..."`,
+  // and added `track="inbound" audioTrack="inbound" contentType="audio/x-mulaw;rate=8000"`.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Record
@@ -415,18 +419,20 @@ app.all('/plivo-xml', (req, res) => {
     recordSession="true"
     maxLength="3600" />
   <Stream
-    serviceUrl="wss://triumphant-victory-production.up.railway.app/listen"
-    transport="websocket"
-    track="both"
-    encoding="mulaw"
-    sampleRate="8000"
+    url="wss://triumphant-victory-production.up.railway.app/listen"
+    streamTimeout="3600"
     keepCallAlive="true"
+    track="inbound"
+    audioTrack="inbound"
+    contentType="audio/x-mulaw;rate=8000"
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
 
+  // Make sure the header is exactly application/xml (Plivo expects XML)
   res.set('Content-Type', 'application/xml; charset=utf-8');
   res.send(xml);
 });
+
 
 
 // Constants for Deepgram connection
