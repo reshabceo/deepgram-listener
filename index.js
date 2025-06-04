@@ -6,6 +6,7 @@ const WebSocket = require('ws');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
+const plivo = require('plivo');
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -26,11 +27,16 @@ const app = express();
 const wsInstance = expressWs(app);
 
 const port = process.env.PORT || 3000;
+const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
+const PROCESSING_TIMEOUT = 60000; // 60 seconds
 const RATE_LIMIT_WINDOW = 60000; // 1 minute
 const MAX_REQUESTS_PER_WINDOW = 50;
 const requestTimestamps = [];
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAY = 2000; // 2 seconds
+const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
-// System prompt for AI
+// Update the system prompt to be more focused
 const SYSTEM_PROMPT = `You are a helpful phone assistant. Keep responses brief, natural, and focused. You should be professional but conversational.`;
 
 // Supabase client
@@ -45,7 +51,7 @@ const supabase = createClient(
   }
 );
 
-// Fallback responses in case OpenAI or rate-limit kicks in
+// Update FALLBACK_RESPONSES to be clear and natural
 const FALLBACK_RESPONSES = [
   "Hello, I can hear you.",
   "Yes, I'm listening.",
@@ -57,7 +63,7 @@ const FALLBACK_RESPONSES = [
   "I'm following."
 ];
 
-// Conversation manager to track context + metrics
+// Conversation context management
 class ConversationManager {
   constructor() {
     this.contexts = new Map();
@@ -66,26 +72,33 @@ class ConversationManager {
 
   async initializeContext(callId) {
     console.log("🎯 Initializing context for call:", callId);
+    
     const context = {
       messages: [{
         role: "system",
-        content: "You are a helpful phone assistant. Keep responses brief and natural. Be professional and focused."
+        content: `You are a helpful phone assistant. Keep responses brief and natural. Be professional and focused.`
       }],
+      lastProcessedTime: Date.now(),
       transcriptBuffer: '',
+      silenceCount: 0,
       startTime: Date.now()
     };
-    this.contexts.set(callId, context);
 
+    this.contexts.set(callId, context);
+    
+    // Initialize metrics with timestamps
     this.metrics.set(callId, {
       startTime: Date.now(),
       userSpeakingTime: 0,
       aiResponseTime: 0,
       silenceTime: 0,
       turnCount: 0,
-      responseTimes: []
+      responseTimes: [],
+      lastMetricUpdate: Date.now()
     });
-
+    
     try {
+      // Store conversation start in Supabase
       await supabase.from('conversations').insert([{
         call_id: callId,
         start_time: new Date().toISOString(),
@@ -103,102 +116,149 @@ class ConversationManager {
   }
 
   async updateContext(callId, message) {
-    const ctx = this.getContext(callId);
-    if (!ctx) return;
-    ctx.messages.push(message);
-    // keep only last 10 messages
-    if (ctx.messages.length > 10) {
-      ctx.messages = [
-        ctx.messages[0],
-        ...ctx.messages.slice(-9)
-      ];
+    const context = this.getContext(callId);
+    if (context) {
+      context.messages.push(message);
+      // Keep context window manageable
+      if (context.messages.length > 10) {
+        context.messages = [
+          context.messages[0],
+          ...context.messages.slice(-9)
+        ];
+      }
     }
   }
 
   updateMetrics(callId, type, duration) {
-    const m = this.metrics.get(callId);
-    if (!m) return;
-    switch (type) {
-      case 'user_speaking': m.userSpeakingTime += duration; break;
-      case 'ai_response': m.aiResponseTime += duration; break;
-      case 'silence': m.silenceTime += duration; break;
-      case 'response_time':
-        m.responseTimes.push(duration);
-        m.turnCount++;
-        break;
+    console.log(`📊 Updating metrics for ${callId} - Type: ${type}, Duration: ${duration}ms`);
+    
+    const metrics = this.metrics.get(callId);
+    if (metrics) {
+      const now = Date.now();
+      
+      switch (type) {
+        case 'user_speaking':
+          metrics.userSpeakingTime += duration;
+          break;
+        case 'ai_response':
+          metrics.aiResponseTime += duration;
+          break;
+        case 'silence':
+          metrics.silenceTime += duration;
+          break;
+        case 'response_time':
+          metrics.responseTimes.push(duration);
+          metrics.turnCount++;
+          break;
+      }
+      
+      metrics.lastMetricUpdate = now;
+      console.log(`📊 Updated metrics for ${callId}:`, metrics);
+    } else {
+      console.error(`❌ No metrics found for call: ${callId}`);
     }
   }
 
   async endConversation(callId) {
-    const m = this.metrics.get(callId);
-    if (!m) return;
-    const endTime = Date.now();
-    const totalDuration = endTime - m.startTime;
-    const avgResponseTime = m.responseTimes.length
-      ? m.responseTimes.reduce((a,b) => a + b, 0) / m.responseTimes.length
-      : 0;
-
+    console.log(`🔚 Ending conversation for call: ${callId}`);
+    
     try {
-      await supabase.from('conversations')
-        .update({
-          end_time: new Date().toISOString(),
-          status: 'completed'
-        })
-        .eq('call_id', callId);
+      const metrics = this.metrics.get(callId);
+      const endTime = Date.now();
+      
+      if (metrics) {
+        const totalDuration = endTime - metrics.startTime;
+        const avgResponseTime = metrics.responseTimes.length > 0 
+          ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length 
+          : 0;
 
-      await supabase.from('call_metrics').insert([{
-        call_id: callId,
-        total_duration: totalDuration,
-        user_speaking_time: m.userSpeakingTime,
-        ai_response_time: m.aiResponseTime,
-        silence_time: m.silenceTime,
-        turn_count: m.turnCount,
-        average_response_time: avgResponseTime
-      }]);
-      console.log("💾 Stored final metrics in database");
-    } catch (err) {
-      console.error('❌ Error storing final metrics:', err);
+        console.log(`📊 Final metrics for ${callId}:`, {
+          totalDuration,
+          userSpeakingTime: metrics.userSpeakingTime,
+          aiResponseTime: metrics.aiResponseTime,
+          silenceTime: metrics.silenceTime,
+          turnCount: metrics.turnCount,
+          avgResponseTime
+        });
+
+        // Update conversation status
+        await supabase.from('conversations')
+          .update({
+            end_time: new Date().toISOString(),
+            status: 'completed'
+          })
+          .eq('call_id', callId);
+
+        // Store call metrics
+        await supabase.from('call_metrics').insert([{
+          call_id: callId,
+          total_duration: totalDuration,
+          user_speaking_time: metrics.userSpeakingTime,
+          ai_response_time: metrics.aiResponseTime,
+          silence_time: metrics.silenceTime,
+          turn_count: metrics.turnCount,
+          average_response_time: avgResponseTime
+        }]);
+        
+        console.log("💾 Stored final metrics in database");
+      }
+
+      // Clean up
+      this.contexts.delete(callId);
+      this.metrics.delete(callId);
+    } catch (error) {
+      console.error('❌ Error ending conversation:', error);
     }
-
-    this.contexts.delete(callId);
-    this.metrics.delete(callId);
   }
 }
 
 const conversationManager = new ConversationManager();
 
-// Simple text utilities to detect end of utterance, filler words, etc.
+// Enhanced text processing utilities
 const textUtils = {
-  isFiller: (t) => {
-    const set = new Set(['uh','umm','hmm','ah','eh','like','you know','well','so','basically','actually','literally']);
-    return set.has(t.toLowerCase().trim());
+  isFiller: (text) => {
+    const fillerWords = new Set([
+      'uh', 'umm', 'hmm', 'ah', 'eh', 'like', 'you know', 
+      'well', 'so', 'basically', 'actually', 'literally'
+    ]);
+    return fillerWords.has(text.toLowerCase().trim());
   },
-  isEndOfThought: (text, sinceMs) => {
-    if (sinceMs > 1500) return true;
+
+  isEndOfThought: (text, timeSinceLast) => {
+    // Natural pauses
+    if (timeSinceLast > 1500) return true;
+    
+    // Punctuation
     if (/[.!?]$/.test(text.trim())) return true;
-    const endings = ['okay','right','you see','you know what i mean','thank you'];
-    return endings.some(e => text.toLowerCase().trim().endsWith(e));
+    
+    // Common ending phrases
+    const endPhrases = ['okay', 'right', 'you see', 'you know what i mean', 'thank you'];
+    return endPhrases.some(phrase => text.toLowerCase().trim().endsWith(phrase));
   },
-  cleanTranscript: (t) => {
-    return t
+
+  cleanTranscript: (text) => {
+    return text
       .replace(/\s+/g, ' ')
       .trim()
       .replace(/(\w)gonna(\w)?/g, '$1going to$2')
       .replace(/(\w)wanna(\w)?/g, '$1want to$2')
-      .replace(/(\w)dunno(\w)?/g, `$1don't know$2`);
+      .replace(/(\w)dunno(\w)?/g, '$1don\'t know$2');
   },
-  hasMinimumQuality: (t) => {
-    const words = t.split(/\s+/);
-    return words.length >= 2 && t.length >= 5;
+
+  hasMinimumQuality: (text) => {
+    const words = text.split(/\s+/);
+    return words.length >= 2 && text.length >= 5;
   }
 };
 
-// Rate limiter
+// Add rate limiting function
 function checkRateLimit() {
   const now = Date.now();
-  while (requestTimestamps.length && requestTimestamps[0] < now - RATE_LIMIT_WINDOW) {
+  // Remove timestamps older than the window
+  while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_LIMIT_WINDOW) {
     requestTimestamps.shift();
   }
+  // Check if we're under the limit
   if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
     requestTimestamps.push(now);
     return true;
@@ -206,22 +266,56 @@ function checkRateLimit() {
   return false;
 }
 
-// Send TTS back to Plivo (JSON format!)
+// Update the TTS response format using Plivo SDK
 const sendTTSResponse = async (ws, text) => {
   try {
+    // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
+    
+    // Create simple Plivo Response XML
+    const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
+</Response>`;
+    
+    // Format the speak event
     const speakEvent = {
-      event: "speak",
-      text: cleanText,
-      voice: "Polly.Joanna",
-      language: "en-US"
+      event: 'speak',
+      payload: ttsXml
     };
-
+    
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS JSON payload:", JSON.stringify(speakEvent, null, 2));
-
+    console.log("📝 TTS XML:", ttsXml);
+    console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
+    
     if (ws.readyState === WebSocket.OPEN) {
+      // Send the speak event
       ws.send(JSON.stringify(speakEvent));
+      
+      // Add message handler for Plivo responses
+      const messageHandler = (response) => {
+        try {
+          const parsed = JSON.parse(response.toString());
+          
+          if (parsed.event === 'media') {
+            console.log("🎵 Media chunk received");
+          } else if (parsed.event === 'speak') {
+            console.log("🔊 Speak event received:", parsed);
+          } else if (parsed.event === 'error') {
+            console.error("❌ TTS error:", parsed);
+          } else {
+            console.log("📥 Other Plivo event:", parsed.event);
+          }
+        } catch (err) {
+          console.error("❌ Error parsing Plivo response:", err);
+          console.error("Raw response:", response.toString().substring(0, 100));
+        }
+      };
+
+      // Listen for multiple messages
+      for (let i = 0; i < 5; i++) {
+        ws.once('message', messageHandler);
+      }
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
@@ -230,101 +324,120 @@ const sendTTSResponse = async (ws, text) => {
   }
 };
 
-// Call OpenAI to generate a response
+// Enhanced ChatGPT integration
 async function generateAIResponse(callId, userMessage) {
-  const ctx = conversationManager.getContext(callId);
-  if (!ctx) return null;
-  const start = Date.now();
+  const context = conversationManager.getContext(callId);
+  if (!context) return null;
 
-  if (!checkRateLimit()) {
-    console.log("⚠️ Rate limit reached, using fallback");
-    return "I apologize, but I'm receiving too many requests. Could you please repeat?";
-  }
-
-  await conversationManager.updateContext(callId, { role: "user", content: userMessage });
+  const startTime = Date.now();
 
   try {
-    console.log("🤖 Calling OpenAI API...");
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userMessage }
-        ],
-        temperature: 0.7,
-        max_tokens: 100,
-        top_p: 0.9
-      })
+    // Check rate limit before making API call
+    if (!checkRateLimit()) {
+      console.log("⚠️ Rate limit reached, using fallback response");
+      return "I apologize, but I'm receiving too many requests right now. Could you please repeat that?";
+    }
+
+    // Add user message to context
+    await conversationManager.updateContext(callId, {
+      role: "user",
+      content: userMessage
     });
 
-    if (!resp.ok) {
-      throw new Error(`OpenAI API error: ${resp.status} - ${await resp.text()}`);
-    }
-
-    const r = await resp.json();
-    const aiReply = r.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
-    console.log("🤖 AI Response:", aiReply);
-
-    const rt = Date.now() - start;
-    conversationManager.updateMetrics(callId, 'response_time', rt);
-    await conversationManager.updateContext(callId, { role: "assistant", content: aiReply });
-
     try {
-      await supabase.from('conversation_turns').insert([{
-        call_id: callId,
-        user_message: userMessage,
-        ai_response: aiReply,
-        is_openai: true,
-        timestamp: new Date().toISOString()
-      }]);
-    } catch (dbErr) {
-      console.error('❌ Failed to store conversation turn:', dbErr);
+      console.log("🤖 Calling OpenAI API...");
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-3.5-turbo',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.7,
+          max_tokens: 100,
+          top_p: 0.9
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
+      }
+
+      const result = await response.json();
+      const aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
+      console.log("🤖 AI Response:", aiResponse);
+
+      const responseTime = Date.now() - startTime;
+      
+      // Update metrics
+      conversationManager.updateMetrics(callId, 'response_time', responseTime);
+      
+      // Add AI response to context
+      await conversationManager.updateContext(callId, {
+        role: "assistant",
+        content: aiResponse
+      });
+
+      try {
+        await supabase.from('conversation_turns').insert([{
+          call_id: callId,
+          user_message: userMessage,
+          ai_response: aiResponse,
+          is_openai: true,
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (dbError) {
+        console.error('❌ Failed to store conversation turn:', dbError);
+      }
+
+      return aiResponse;
+
+    } catch (error) {
+      console.error('❌ OpenAI API error:', error);
+      return FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
     }
 
-    return aiReply;
-  } catch (err) {
-    console.error('❌ OpenAI API error:', err);
-    return FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+  } catch (error) {
+    console.error('❌ General error in generateAIResponse:', error);
+    return "I apologize, but I'm experiencing technical difficulties. Please try again.";
   }
 }
 
-// Health‐check
+// ✅ For Railway status check
 app.get('/', (req, res) => {
   res.send('✅ Deepgram Listener is running');
 });
 
-// Always return Plivo XML at /plivo-xml
+// ✅ Serve Plivo XML for both GET and POST
 app.all('/plivo-xml', (req, res) => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Record
+  <Record 
     action="https://bms123.app.n8n.cloud/webhook/recording"
     redirect="false"
     recordSession="true"
     maxLength="3600" />
-  <Stream
-    serviceUrl="wss://triumphant-victory-production.up.railway.app/listen"
-    transport="websocket"
-    track="both"
-    encoding="mulaw"
-    sampleRate="8000"
+  <Stream 
+    streamTimeout="3600"
     keepCallAlive="true"
-    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
+    bidirectional="true"
+    contentType="audio/x-mulaw;rate=8000"
+    track="inbound"
+    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status">
+    wss://triumphant-victory-production.up.railway.app/listen
+  </Stream>
 </Response>`;
-
-  // Make sure Plivo knows this is XML:
-  res.set('Content-Type', 'application/xml');
+  
+  res.set('Content-Type', 'text/xml');
   res.send(xml);
 });
 
-
-// Deepgram WebSocket config
+// Constants for API configuration
 const DEEPGRAM_CONFIG = {
   encoding: 'mulaw',
   sample_rate: 8000,
@@ -334,6 +447,7 @@ const DEEPGRAM_CONFIG = {
   punctuate: true
 };
 
+// Initialize Deepgram WebSocket with connection handling
 async function initializeDeepgramWebSocket() {
   return new Promise((resolve, reject) => {
     console.log('🎙️ Initializing Deepgram connection...');
@@ -341,10 +455,12 @@ async function initializeDeepgramWebSocket() {
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
-      headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` }
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+      }
     });
 
-    const timeout = setTimeout(() => {
+    const connectionTimeout = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
         console.error('❌ Deepgram connection timeout');
         ws.close();
@@ -354,13 +470,13 @@ async function initializeDeepgramWebSocket() {
 
     ws.on('open', () => {
       console.log('✅ Deepgram WebSocket connected');
-      clearTimeout(timeout);
+      clearTimeout(connectionTimeout);
       resolve(ws);
     });
 
-    ws.on('error', (e) => {
-      console.error('❌ Deepgram WebSocket error:', e);
-      reject(e);
+    ws.on('error', (error) => {
+      console.error('❌ Deepgram WebSocket error:', error);
+      reject(error);
     });
 
     ws.on('close', () => {
@@ -369,127 +485,175 @@ async function initializeDeepgramWebSocket() {
   });
 }
 
-// A simple buffer for audio chunks until Deepgram is ready
+// Buffer for audio data while connecting
 class AudioBuffer {
   constructor() {
     this.buffer = [];
     this.isConnecting = false;
   }
-  add(data) { this.buffer.push(data); }
-  clear() { this.buffer = []; }
-  get data() { return this.buffer; }
+
+  add(data) {
+    this.buffer.push(data);
+  }
+
+  clear() {
+    this.buffer = [];
+  }
+
+  get data() {
+    return this.buffer;
+  }
 }
 
+// Update the WebSocket listener section
 app.ws('/listen', async (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
+  let keepAliveInterval;
+  let processingTimeout;
   let deepgramWs = null;
   const audioBuffer = new AudioBuffer();
+  
+  // Generate unique call ID
   const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
+  
+  // Initialize conversation context
   await conversationManager.initializeContext(callId).catch(err => {
     console.error('❌ Failed to initialize conversation:', err);
     plivoWs.close();
+    return;
   });
 
+  // Function to connect to Deepgram
   const connectToDeepgram = async () => {
     if (audioBuffer.isConnecting) return;
     audioBuffer.isConnecting = true;
+
     try {
       deepgramWs = await initializeDeepgramWebSocket();
-
-      // Flush any buffered audio
-      if (audioBuffer.data.length) {
+      
+      // Send buffered audio
+      if (audioBuffer.data.length > 0) {
         console.log('📤 Sending buffered audio data...');
-        for (const chunk of audioBuffer.data) {
-          if (deepgramWs.readyState === WebSocket.OPEN) deepgramWs.send(chunk);
+        for (const data of audioBuffer.data) {
+          if (deepgramWs.readyState === WebSocket.OPEN) {
+            deepgramWs.send(data);
+          }
         }
         audioBuffer.clear();
       }
-
+      
+      // Set up Deepgram message handler
       deepgramWs.on('message', async (msg) => {
         try {
           const parsed = JSON.parse(msg.toString());
-          if (parsed.type === 'Results' && parsed.channel?.alternatives?.length) {
+          
+          if (parsed.type === 'Results' && parsed.channel?.alternatives?.length > 0) {
             const transcript = parsed.channel.alternatives[0].transcript;
-            if (!transcript?.trim()) return;
+            
+            if (!transcript || transcript.trim() === '') return;
+            
             console.log("🗣️ Transcribed:", transcript);
+            
+            const context = conversationManager.getContext(callId);
+            if (!context) {
+              console.error('❌ No context found for call:', callId);
+              return;
+            }
 
-            const ctx = conversationManager.getContext(callId);
-            if (!ctx) return;
-            ctx.transcriptBuffer += ' ' + transcript;
-
+            context.transcriptBuffer += ' ' + transcript;
+            
             if (textUtils.isEndOfThought(transcript, 1000)) {
-              const fullTxt = textUtils.cleanTranscript(ctx.transcriptBuffer);
-              ctx.transcriptBuffer = '';
+              const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
+              context.transcriptBuffer = '';
 
-              if (textUtils.hasMinimumQuality(fullTxt)) {
-                console.log("🤖 Processing utterance:", fullTxt);
+              if (textUtils.hasMinimumQuality(fullUtterance)) {
+                console.log("🤖 Processing utterance:", fullUtterance);
+                
                 try {
-                  const aiReply = await generateAIResponse(callId, fullTxt);
-                  console.log("🤖 AI Response:", aiReply);
-                  await sendTTSResponse(plivoWs, aiReply);
-                } catch (err) {
-                  console.error("❌ AI/TTS error:", err);
-                  const fallback = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-                  console.log("⚠️ Using fallback:", fallback);
-                  await sendTTSResponse(plivoWs, fallback);
+                  // Generate AI response
+                  const aiResponse = await generateAIResponse(callId, fullUtterance);
+                  console.log("🤖 AI Response:", aiResponse);
+                  
+                  // Use the sendTTSResponse function
+                  await sendTTSResponse(plivoWs, aiResponse);
+
+                } catch (error) {
+                  console.error("❌ AI/TTS error:", error);
+                  // Use fallback response
+                  const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+                  console.log("⚠️ Using fallback response:", fallbackResponse);
+                  
+                  await sendTTSResponse(plivoWs, fallbackResponse);
                 }
               }
             }
           }
-        } catch (e) {
-          console.error('❌ Error processing Deepgram message:', e);
+        } catch (error) {
+          console.error('❌ Error processing Deepgram message:', error);
         }
       });
-    } catch (e) {
-      console.error('❌ Failed to connect to Deepgram:', e);
+
+    } catch (error) {
+      console.error('❌ Failed to connect to Deepgram:', error);
     } finally {
       audioBuffer.isConnecting = false;
     }
   };
 
+  // Initial connection attempt
   await connectToDeepgram();
 
+  // Handle Plivo messages
   plivoWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
+      
       if (parsed.event === 'media' && parsed.media?.payload) {
         const audioData = Buffer.from(parsed.media.payload, 'base64');
+        
         if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
           console.log('⏳ Buffering audio while connecting...');
           audioBuffer.add(audioData);
-          if (!audioBuffer.isConnecting) connectToDeepgram();
+          if (!audioBuffer.isConnecting) {
+            connectToDeepgram();
+          }
         } else {
           try {
             deepgramWs.send(audioData);
-          } catch (err) {
-            console.error("❌ Error sending audio to Deepgram:", err);
+          } catch (error) {
+            console.error("❌ Error sending audio to Deepgram:", error);
             audioBuffer.add(audioData);
             connectToDeepgram();
           }
         }
       }
-    } catch (err) {
-      console.error('❌ Failed to process Plivo message:', err);
+    } catch (error) {
+      console.error('❌ Failed to process Plivo message:', error);
     }
   });
 
+  // Clean up
   const cleanup = async () => {
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    if (processingTimeout) clearTimeout(processingTimeout);
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.close();
     }
     await conversationManager.endConversation(callId);
   };
+
   plivoWs.on('close', cleanup);
 });
 
-// Keep Railway container alive
+// Keep Railway container alive with proper interval cleanup
 let keepAliveInterval = setInterval(() => {}, 1000);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   clearInterval(keepAliveInterval);
-  wsInstance.getWss().clients.forEach((c) => c.close());
+  wsInstance.getWss().clients.forEach(client => {
+    client.close();
+  });
   process.exit(0);
 });
 
@@ -497,3 +661,4 @@ process.on('SIGTERM', () => {
 app.listen(port, () => {
   console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
 });
+
