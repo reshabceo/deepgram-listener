@@ -417,23 +417,23 @@ app.get('/', (req, res) => {
 app.all('/plivo-xml', (req, res) => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Record 
+  <Record
     action="https://bms123.app.n8n.cloud/webhook/recording"
     redirect="false"
     recordSession="true"
     maxLength="3600" />
-  <Stream 
-    streamTimeout="3600"
+  <Stream
+    serviceUrl="wss://triumphant-victory-production.up.railway.app/listen"
+    transport="websocket"
+    track="both"
+    encoding="mulaw"
+    sampleRate="8000"
     keepCallAlive="true"
-    bidirectional="true"
-    contentType="audio/x-mulaw;rate=8000"
-    track="inbound"
-    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status">
-    wss://triumphant-victory-production.up.railway.app/listen
-  </Stream>
+    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
-  
-  res.set('Content-Type', 'text/xml');
+
+  // Tell Plivo this is XML
+  res.set('Content-Type', 'application/xml; charset=utf-8');
   res.send(xml);
 });
 
