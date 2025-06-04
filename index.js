@@ -3,15 +3,20 @@ require('dotenv').config();
 const express = require('express');
 const expressWs = require('express-ws');
 const WebSocket = require('ws');
+const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
+const plivo = require('plivo');
 
 // Validate required environment variables
 const requiredEnvVars = [
   'SUPABASE_URL',
   'SUPABASE_SERVICE_KEY',
   'DEEPGRAM_API_KEY',
-  'OPENAI_API_KEY'
+  'OPENAI_API_KEY',
+  'PLIVO_AUTH_ID',
+  'PLIVO_AUTH_TOKEN',
+  'BASE_URL'
 ];
 
 for (const envVar of requiredEnvVars) {
@@ -24,17 +29,21 @@ for (const envVar of requiredEnvVars) {
 const app = express();
 const wsInstance = expressWs(app);
 
+// Add middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 const port = process.env.PORT || 3000;
 const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
-const PROCESSING_TIMEOUT = 60000;   // 60 seconds
-const RATE_LIMIT_WINDOW = 60000;    // 1 minute
+const PROCESSING_TIMEOUT = 60000; // 60 seconds
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
 const MAX_REQUESTS_PER_WINDOW = 50;
 const requestTimestamps = [];
 const MAX_RECONNECT_ATTEMPTS = 3;
-const RECONNECT_DELAY = 2000;       // 2 seconds
-const CONNECTION_TIMEOUT = 5000;    // 5 seconds
+const RECONNECT_DELAY = 2000; // 2 seconds
+const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
-// System prompt for AI
+// Update the system prompt to be more focused
 const SYSTEM_PROMPT = `You are a helpful phone assistant. Keep responses brief, natural, and focused. You should be professional but conversational.`;
 
 // Supabase client
@@ -49,7 +58,7 @@ const supabase = createClient(
   }
 );
 
-// Fallback responses
+// Update FALLBACK_RESPONSES to be clear and natural
 const FALLBACK_RESPONSES = [
   "Hello, I can hear you.",
   "Yes, I'm listening.",
@@ -61,7 +70,7 @@ const FALLBACK_RESPONSES = [
   "I'm following."
 ];
 
-// Conversation manager
+// Conversation context management
 class ConversationManager {
   constructor() {
     this.contexts = new Map();
@@ -70,28 +79,33 @@ class ConversationManager {
 
   async initializeContext(callId) {
     console.log("🎯 Initializing context for call:", callId);
-
+    
     const context = {
       messages: [{
         role: "system",
         content: `You are a helpful phone assistant. Keep responses brief and natural. Be professional and focused.`
       }],
+      lastProcessedTime: Date.now(),
       transcriptBuffer: '',
+      silenceCount: 0,
       startTime: Date.now()
     };
 
     this.contexts.set(callId, context);
-
+    
+    // Initialize metrics with timestamps
     this.metrics.set(callId, {
       startTime: Date.now(),
       userSpeakingTime: 0,
       aiResponseTime: 0,
       silenceTime: 0,
       turnCount: 0,
-      responseTimes: []
+      responseTimes: [],
+      lastMetricUpdate: Date.now()
     });
-
+    
     try {
+      // Store conversation start in Supabase
       await supabase.from('conversations').insert([{
         call_id: callId,
         start_time: new Date().toISOString(),
@@ -112,6 +126,7 @@ class ConversationManager {
     const context = this.getContext(callId);
     if (context) {
       context.messages.push(message);
+      // Keep context window manageable
       if (context.messages.length > 10) {
         context.messages = [
           context.messages[0],
@@ -122,76 +137,171 @@ class ConversationManager {
   }
 
   updateMetrics(callId, type, duration) {
+    console.log(`📊 Updating metrics for ${callId} - Type: ${type}, Duration: ${duration}ms`);
+    
     const metrics = this.metrics.get(callId);
-    if (!metrics) return;
-    switch (type) {
-      case 'user_speaking':
-        metrics.userSpeakingTime += duration;
-        break;
-      case 'ai_response':
-        metrics.aiResponseTime += duration;
-        break;
-      case 'silence':
-        metrics.silenceTime += duration;
-        break;
-      case 'response_time':
-        metrics.responseTimes.push(duration);
-        metrics.turnCount++;
-        break;
+    if (metrics) {
+      const now = Date.now();
+      
+      switch (type) {
+        case 'user_speaking':
+          metrics.userSpeakingTime += duration;
+          break;
+        case 'ai_response':
+          metrics.aiResponseTime += duration;
+          break;
+        case 'silence':
+          metrics.silenceTime += duration;
+          break;
+        case 'response_time':
+          metrics.responseTimes.push(duration);
+          metrics.turnCount++;
+          break;
+      }
+      
+      metrics.lastMetricUpdate = now;
+      console.log(`📊 Updated metrics for ${callId}:`, metrics);
+    } else {
+      console.error(`❌ No metrics found for call: ${callId}`);
     }
   }
 
   async endConversation(callId) {
-    const metrics = this.metrics.get(callId);
-    if (!metrics) return;
-    const endTime = Date.now();
-    const totalDuration = endTime - metrics.startTime;
-    const avgResponseTime = metrics.responseTimes.length
-      ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length
-      : 0;
-
+    console.log(`🔚 Ending conversation for call: ${callId}`);
+    
     try {
-      await supabase.from('conversations')
-        .update({
-          end_time: new Date().toISOString(),
-          status: 'completed'
-        })
-        .eq('call_id', callId);
+      const metrics = this.metrics.get(callId);
+      const endTime = Date.now();
+      
+      if (metrics) {
+        const totalDuration = endTime - metrics.startTime;
+        const avgResponseTime = metrics.responseTimes.length > 0 
+          ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length 
+          : 0;
 
-      await supabase.from('call_metrics').insert([{
-        call_id: callId,
-        total_duration: totalDuration,
-        user_speaking_time: metrics.userSpeakingTime,
-        ai_response_time: metrics.aiResponseTime,
-        silence_time: metrics.silenceTime,
-        turn_count: metrics.turnCount,
-        average_response_time: avgResponseTime
-      }]);
-      console.log("💾 Stored final metrics in database");
-    } catch (err) {
-      console.error('❌ Error storing final metrics:', err);
+        console.log(`📊 Final metrics for ${callId}:`, {
+          totalDuration,
+          userSpeakingTime: metrics.userSpeakingTime,
+          aiResponseTime: metrics.aiResponseTime,
+          silenceTime: metrics.silenceTime,
+          turnCount: metrics.turnCount,
+          avgResponseTime
+        });
+
+        // Update conversation status
+        await supabase.from('conversations')
+          .update({
+            end_time: new Date().toISOString(),
+            status: 'completed'
+          })
+          .eq('call_id', callId);
+
+        // Store call metrics
+        await supabase.from('call_metrics').insert([{
+          call_id: callId,
+          total_duration: totalDuration,
+          user_speaking_time: metrics.userSpeakingTime,
+          ai_response_time: metrics.aiResponseTime,
+          silence_time: metrics.silenceTime,
+          turn_count: metrics.turnCount,
+          average_response_time: avgResponseTime
+        }]);
+        
+        console.log("💾 Stored final metrics in database");
+      }
+
+      // Clean up
+      this.contexts.delete(callId);
+      this.metrics.delete(callId);
+    } catch (error) {
+      console.error('❌ Error ending conversation:', error);
     }
-
-    this.contexts.delete(callId);
-    this.metrics.delete(callId);
   }
 }
 
 const conversationManager = new ConversationManager();
 
-// Text processing utilities
+// Transcript management
+class TranscriptManager {
+  constructor() {
+    this.pendingTranscripts = new Map();
+  }
+
+  async saveTranscript(callId, transcript, isFinal = true) {
+    try {
+      const { data, error } = await supabase
+        .from('transcripts')
+        .insert([{
+          call_uuid: callId,
+          transcript_text: transcript.text,
+          speaker: transcript.speaker || 'user',
+          confidence: transcript.confidence,
+          is_final: isFinal,
+          timestamp: new Date().toISOString()
+        }]);
+
+      if (error) throw error;
+      console.log(`💾 Saved transcript for call ${callId}`);
+      return data;
+    } catch (error) {
+      console.error('❌ Error saving transcript:', error);
+      throw error;
+    }
+  }
+
+  async getTranscripts(callId) {
+    try {
+      const { data, error } = await supabase
+        .from('transcripts')
+        .select('*')
+        .eq('call_uuid', callId)
+        .order('timestamp', { ascending: true });
+
+      if (error) throw error;
+      return data;
+    } catch (error) {
+      console.error('❌ Error fetching transcripts:', error);
+      throw error;
+    }
+  }
+
+  updatePendingTranscript(callId, text, speaker) {
+    this.pendingTranscripts.set(callId, {
+      text,
+      speaker,
+      timestamp: new Date()
+    });
+  }
+
+  getPendingTranscript(callId) {
+    return this.pendingTranscripts.get(callId);
+  }
+
+  clearPendingTranscript(callId) {
+    this.pendingTranscripts.delete(callId);
+  }
+}
+
+const transcriptManager = new TranscriptManager();
+
+// Enhanced text processing utilities
 const textUtils = {
   isFiller: (text) => {
     const fillerWords = new Set([
-      'uh', 'umm', 'hmm', 'ah', 'eh', 'like', 'you know',
+      'uh', 'umm', 'hmm', 'ah', 'eh', 'like', 'you know', 
       'well', 'so', 'basically', 'actually', 'literally'
     ]);
     return fillerWords.has(text.toLowerCase().trim());
   },
 
   isEndOfThought: (text, timeSinceLast) => {
+    // Natural pauses
     if (timeSinceLast > 1500) return true;
+    
+    // Punctuation
     if (/[.!?]$/.test(text.trim())) return true;
+    
+    // Common ending phrases
     const endPhrases = ['okay', 'right', 'you see', 'you know what i mean', 'thank you'];
     return endPhrases.some(phrase => text.toLowerCase().trim().endsWith(phrase));
   },
@@ -202,7 +312,7 @@ const textUtils = {
       .trim()
       .replace(/(\w)gonna(\w)?/g, '$1going to$2')
       .replace(/(\w)wanna(\w)?/g, '$1want to$2')
-      .replace(/(\w)dunno(\w)?/g, `$1don't know$2`);
+      .replace(/(\w)dunno(\w)?/g, '$1don\'t know$2');
   },
 
   hasMinimumQuality: (text) => {
@@ -211,12 +321,14 @@ const textUtils = {
   }
 };
 
-// Rate limiter
+// Add rate limiting function
 function checkRateLimit() {
   const now = Date.now();
-  while (requestTimestamps.length && requestTimestamps[0] < now - RATE_LIMIT_WINDOW) {
+  // Remove timestamps older than the window
+  while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_LIMIT_WINDOW) {
     requestTimestamps.shift();
   }
+  // Check if we're under the limit
   if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
     requestTimestamps.push(now);
     return true;
@@ -224,134 +336,193 @@ function checkRateLimit() {
   return false;
 }
 
-// Send TTS response (default voice) over Plivo WebSocket
-async function sendTTSResponse(plivoWs, text) {
+// Update the TTS response format using Plivo SDK
+const sendTTSResponse = async (ws, text) => {
   try {
+    // Clean and format the text for TTS
     const cleanText = text.replace(/[<>]/g, '').trim();
+    
+    // Create simple Plivo Response XML
     const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Speak>${cleanText}</Speak>
+    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
 </Response>`;
-
+    
+    // Format the speak event
     const speakEvent = {
       event: 'speak',
-      payload: ttsXml,
-      content_type: 'application/xml'
+      payload: ttsXml
     };
-
+    
+    console.log("🎯 WebSocket State:", ws.readyState);
     console.log("📝 TTS XML:", ttsXml);
-    if (plivoWs.readyState === WebSocket.OPEN) {
-      plivoWs.send(JSON.stringify(speakEvent));
+    console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
+    
+    if (ws.readyState === WebSocket.OPEN) {
+      // Send the speak event
+      ws.send(JSON.stringify(speakEvent));
+      
+      // Add message handler for Plivo responses
+      const messageHandler = (response) => {
+        try {
+          const parsed = JSON.parse(response.toString());
+          
+          if (parsed.event === 'media') {
+            console.log("🎵 Media chunk received");
+          } else if (parsed.event === 'speak') {
+            console.log("🔊 Speak event received:", parsed);
+          } else if (parsed.event === 'error') {
+            console.error("❌ TTS error:", parsed);
+          } else {
+            console.log("📥 Other Plivo event:", parsed.event);
+          }
+        } catch (err) {
+          console.error("❌ Error parsing Plivo response:", err);
+          console.error("Raw response:", response.toString().substring(0, 100));
+        }
+      };
+
+      // Listen for multiple messages
+      for (let i = 0; i < 5; i++) {
+        ws.once('message', messageHandler);
+      }
     } else {
-      console.error(`❌ WebSocket not open (State: ${plivoWs.readyState})`);
+      throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
   } catch (error) {
     console.error("❌ Error sending TTS response:", error);
   }
-}
+};
 
-// Generate an AI response using OpenAI
+// Enhanced ChatGPT integration
 async function generateAIResponse(callId, userMessage) {
   const context = conversationManager.getContext(callId);
   if (!context) return null;
+
   const startTime = Date.now();
 
-  if (!checkRateLimit()) {
-    console.log("⚠️ Rate limit reached, using fallback response");
-    return "I apologize, but I'm receiving too many requests right now. Could you please repeat that?";
-  }
-
-  await conversationManager.updateContext(callId, { role: "user", content: userMessage });
-
   try {
-    console.log("🤖 Calling OpenAI API...");
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userMessage }
-        ],
-        temperature: 0.7,
-        max_tokens: 100,
-        top_p: 0.9
-      })
+    // Check rate limit before making API call
+    if (!checkRateLimit()) {
+      console.log("⚠️ Rate limit reached, using fallback response");
+      return "I apologize, but I'm receiving too many requests right now. Could you please repeat that?";
+    }
+
+    // Add user message to context
+    await conversationManager.updateContext(callId, {
+      role: "user",
+      content: userMessage
     });
 
-    if (!response.ok) {
-      throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
-    }
-
-    const result = await response.json();
-    const aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
-    console.log("🤖 AI Response:", aiResponse);
-
-    const responseTime = Date.now() - startTime;
-    conversationManager.updateMetrics(callId, 'response_time', responseTime);
-    await conversationManager.updateContext(callId, { role: "assistant", content: aiResponse });
-
     try {
-      await supabase.from('conversation_turns').insert([{
-        call_id: callId,
-        user_message: userMessage,
-        ai_response: aiResponse,
-        is_openai: true,
-        timestamp: new Date().toISOString()
-      }]);
-    } catch (dbError) {
-      console.error('❌ Failed to store conversation turn:', dbError);
+      console.log("🤖 Calling OpenAI API...");
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-3.5-turbo',
+          messages: [
+            { role: 'system', content: SYSTEM_PROMPT },
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.7,
+          max_tokens: 100,
+          top_p: 0.9
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI API error: ${response.status} - ${await response.text()}`);
+      }
+
+      const result = await response.json();
+      const aiResponse = result.choices[0]?.message?.content || FALLBACK_RESPONSES[0];
+      console.log("🤖 AI Response:", aiResponse);
+
+      const responseTime = Date.now() - startTime;
+      
+      // Update metrics
+      conversationManager.updateMetrics(callId, 'response_time', responseTime);
+      
+      // Add AI response to context
+      await conversationManager.updateContext(callId, {
+        role: "assistant",
+        content: aiResponse
+      });
+
+      try {
+        await supabase.from('conversation_turns').insert([{
+          call_id: callId,
+          user_message: userMessage,
+          ai_response: aiResponse,
+          is_openai: true,
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (dbError) {
+        console.error('❌ Failed to store conversation turn:', dbError);
+      }
+
+      return aiResponse;
+
+    } catch (error) {
+      console.error('❌ OpenAI API error:', error);
+      return FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
     }
 
-    return aiResponse;
   } catch (error) {
-    console.error('❌ OpenAI API error:', error);
-    return FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+    console.error('❌ General error in generateAIResponse:', error);
+    return "I apologize, but I'm experiencing technical difficulties. Please try again.";
   }
 }
 
-// Health‐check
+// ✅ For Railway status check
 app.get('/', (req, res) => {
-  res.send('✅ Deepgram WebSocket listener running on port ' + port);
+  res.send('✅ Deepgram Listener is running');
 });
 
-// Serve Plivo XML
+// ✅ Serve Plivo XML for both GET and POST
 app.all('/plivo-xml', (req, res) => {
+  console.log('📞 Generating Plivo XML response');
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Record
-    action="https://bms123.app.n8n.cloud/webhook/recording"
+  <Record 
+    action="${process.env.BASE_URL}/api/recording"
     redirect="false"
     recordSession="true"
-    maxLength="3600"
-  />
-  <Stream
-    url="wss://triumphant-victory-production.up.railway.app/listen"
-    transport="websocket"
-    track="inbound"
+    maxLength="3600" />
+  <Stream 
+    streamTimeout="3600"
+    keepCallAlive="true"
+    bidirectional="true"
     contentType="audio/x-mulaw;rate=8000"
-    statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status"
-  />
+    track="inbound"
+    statusCallbackUrl="${process.env.BASE_URL}/api/stream-status">
+    wss://${process.env.BASE_URL}/listen
+  </Stream>
 </Response>`;
-
-  res.set('Content-Type', 'application/xml; charset=utf-8');
+  
+  res.set('Content-Type', 'text/xml');
   res.send(xml);
 });
 
-// Deepgram WebSocket config
+// Constants for API configuration
 const DEEPGRAM_CONFIG = {
   encoding: 'mulaw',
   sample_rate: 8000,
   channels: 1,
   model: 'general',
   language: 'en-US',
-  punctuate: true
+  punctuate: true,
+  diarize: true,
+  interim_results: true,
+  utterance_end_ms: 1000,
+  vad_turnoff: 500
 };
 
+// Initialize Deepgram WebSocket with connection handling
 async function initializeDeepgramWebSocket() {
   return new Promise((resolve, reject) => {
     console.log('🎙️ Initializing Deepgram connection...');
@@ -359,7 +530,9 @@ async function initializeDeepgramWebSocket() {
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
-      headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` }
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+      }
     });
 
     const connectionTimeout = setTimeout(() => {
@@ -387,55 +560,43 @@ async function initializeDeepgramWebSocket() {
   });
 }
 
-// Simple buffer for audio chunks
+// Buffer for audio data while connecting
 class AudioBuffer {
   constructor() {
     this.buffer = [];
     this.isConnecting = false;
   }
-  add(data) { this.buffer.push(data); }
-  clear() { this.buffer = []; }
-  get data() { return this.buffer; }
+
+  add(data) {
+    this.buffer.push(data);
+  }
+
+  clear() {
+    this.buffer = [];
+  }
+
+  get data() {
+    return this.buffer;
+  }
 }
 
-// Plivo WebSocket endpoint
+// Update the WebSocket listener section
 app.ws('/listen', async (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
+  let keepAliveInterval;
+  let processingTimeout;
   let deepgramWs = null;
   const audioBuffer = new AudioBuffer();
-
-  // Generate callId
+  
+  // Generate unique call ID
   const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
+  
   // Initialize conversation context
   await conversationManager.initializeContext(callId).catch(err => {
     console.error('❌ Failed to initialize conversation:', err);
     plivoWs.close();
     return;
   });
-
-  // As soon as the Plivo WebSocket is open, send an initial <Speak>
-  const initialXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Speak>
-    Hi there—I’m listening. Please say something.
-  </Speak>
-</Response>`;
-  const initialSpeakEvent = {
-    event: "speak",
-    payload: initialXml,
-    content_type: "application/xml"
-  };
-
-  if (plivoWs.readyState === WebSocket.OPEN) {
-    console.log("▶ Sending initial TTS to Plivo WS");
-    plivoWs.send(JSON.stringify(initialSpeakEvent));
-  } else {
-    plivoWs.once('open', () => {
-      console.log("▶ (On open) sending initial TTS");
-      plivoWs.send(JSON.stringify(initialSpeakEvent));
-    });
-  }
 
   // Function to connect to Deepgram
   const connectToDeepgram = async () => {
@@ -444,45 +605,81 @@ app.ws('/listen', async (plivoWs, req) => {
 
     try {
       deepgramWs = await initializeDeepgramWebSocket();
-
-      // Flush buffered audio
+      
+      // Send buffered audio
       if (audioBuffer.data.length > 0) {
-        console.log('📤 Sending buffered audio to Deepgram...');
-        for (const chunk of audioBuffer.data) {
+        console.log('📤 Sending buffered audio data...');
+        for (const data of audioBuffer.data) {
           if (deepgramWs.readyState === WebSocket.OPEN) {
-            deepgramWs.send(chunk);
+            deepgramWs.send(data);
           }
         }
         audioBuffer.clear();
       }
-
-      // Handle Deepgram messages
+      
+      // Set up Deepgram message handler
       deepgramWs.on('message', async (msg) => {
         try {
           const parsed = JSON.parse(msg.toString());
-          if (parsed.type === 'Results' && parsed.channel?.alternatives?.length > 0) {
-            const transcript = parsed.channel.alternatives[0].transcript;
-            if (!transcript?.trim()) return;
+          
+          if (parsed.type === 'Results') {
+            const transcript = parsed.channel?.alternatives?.[0];
+            if (!transcript) return;
 
-            console.log("🗣️ Transcribed:", transcript);
-            const ctx = conversationManager.getContext(callId);
-            if (!ctx) return;
-            ctx.transcriptBuffer += ' ' + transcript;
+            const transcriptText = transcript.transcript;
+            if (!transcriptText || transcriptText.trim() === '') return;
+            
+            console.log("🗣️ Transcribed:", transcriptText);
+            
+            // Save transcript
+            await transcriptManager.saveTranscript(callId, {
+              text: transcriptText,
+              confidence: transcript.confidence,
+              speaker: parsed.speaker || 'user',
+              is_final: !parsed.is_final
+            });
 
-            if (textUtils.isEndOfThought(transcript, 1000)) {
-              const fullUtterance = textUtils.cleanTranscript(ctx.transcriptBuffer);
-              ctx.transcriptBuffer = '';
+            const context = conversationManager.getContext(callId);
+            if (!context) {
+              console.error('❌ No context found for call:', callId);
+              return;
+            }
+
+            context.transcriptBuffer += ' ' + transcriptText;
+            
+            if (textUtils.isEndOfThought(transcriptText, 1000)) {
+              const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
+              context.transcriptBuffer = '';
 
               if (textUtils.hasMinimumQuality(fullUtterance)) {
                 console.log("🤖 Processing utterance:", fullUtterance);
+                
                 try {
+                  // Generate AI response
                   const aiResponse = await generateAIResponse(callId, fullUtterance);
                   console.log("🤖 AI Response:", aiResponse);
+                  
+                  // Save agent's response transcript
+                  await transcriptManager.saveTranscript(callId, {
+                    text: aiResponse,
+                    speaker: 'agent',
+                    confidence: 1.0
+                  });
+
+                  // Send TTS response
                   await sendTTSResponse(plivoWs, aiResponse);
+
                 } catch (error) {
                   console.error("❌ AI/TTS error:", error);
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
                   console.log("⚠️ Using fallback response:", fallbackResponse);
+                  
+                  await transcriptManager.saveTranscript(callId, {
+                    text: fallbackResponse,
+                    speaker: 'agent',
+                    confidence: 1.0
+                  });
+                  
                   await sendTTSResponse(plivoWs, fallbackResponse);
                 }
               }
@@ -492,6 +689,7 @@ app.ws('/listen', async (plivoWs, req) => {
           console.error('❌ Error processing Deepgram message:', error);
         }
       });
+
     } catch (error) {
       console.error('❌ Failed to connect to Deepgram:', error);
     } finally {
@@ -499,17 +697,19 @@ app.ws('/listen', async (plivoWs, req) => {
     }
   };
 
-  // Attempt to connect to Deepgram immediately
+  // Initial connection attempt
   await connectToDeepgram();
 
-  // Handle incoming Plivo media
+  // Handle Plivo messages
   plivoWs.on('message', async (msg) => {
     try {
       const parsed = JSON.parse(msg.toString());
+      
       if (parsed.event === 'media' && parsed.media?.payload) {
         const audioData = Buffer.from(parsed.media.payload, 'base64');
+        
         if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
-          console.log('⏳ Buffering audio while Deepgram connects...');
+          console.log('⏳ Buffering audio while connecting...');
           audioBuffer.add(audioData);
           if (!audioBuffer.isConnecting) {
             connectToDeepgram();
@@ -529,23 +729,28 @@ app.ws('/listen', async (plivoWs, req) => {
     }
   });
 
-  // Cleanup when Plivo WS closes
+  // Clean up
   const cleanup = async () => {
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    if (processingTimeout) clearTimeout(processingTimeout);
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
       deepgramWs.close();
     }
     await conversationManager.endConversation(callId);
   };
+
   plivoWs.on('close', cleanup);
 });
 
-// Keep Railway container alive
+// Keep Railway container alive with proper interval cleanup
 let keepAliveInterval = setInterval(() => {}, 1000);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   clearInterval(keepAliveInterval);
-  wsInstance.getWss().clients.forEach(client => client.close());
+  wsInstance.getWss().clients.forEach(client => {
+    client.close();
+  });
   process.exit(0);
 });
 
@@ -553,3 +758,211 @@ process.on('SIGTERM', () => {
 app.listen(port, () => {
   console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
 });
+
+// Add API endpoints for transcript retrieval
+app.get('/api/calls/:callId/transcripts', async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const transcripts = await transcriptManager.getTranscripts(callId);
+    res.json(transcripts);
+  } catch (error) {
+    console.error('Error fetching transcripts:', error);
+    res.status(500).json({ error: 'Failed to fetch transcripts' });
+  }
+});
+
+// Get live transcript updates (WebSocket endpoint)
+app.ws('/api/calls/:callId/live-transcript', async (ws, req) => {
+  const { callId } = req.params;
+  
+  // Send initial transcripts
+  try {
+    const transcripts = await transcriptManager.getTranscripts(callId);
+    ws.send(JSON.stringify({ type: 'initial', transcripts }));
+  } catch (error) {
+    console.error('Error sending initial transcripts:', error);
+  }
+
+  // Set up event listener for new transcripts
+  const transcriptHandler = (transcript) => {
+    if (transcript.call_uuid === callId) {
+      ws.send(JSON.stringify({ type: 'update', transcript }));
+    }
+  };
+
+  ws.on('close', () => {
+    // Clean up
+  });
+});
+
+// Initialize Plivo client
+const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
+
+// Call initiation endpoint
+app.post('/api/calls/initiate', async (req, res) => {
+  try {
+    const { from, to } = req.body;
+    
+    if (!from || !to) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required parameters: from and to numbers' 
+      });
+    }
+
+    console.log('📞 Initiating call from', from, 'to', to);
+
+    // Create call using Plivo
+    const response = await plivoClient.calls.create(
+      from,
+      to,
+      `${process.env.BASE_URL}/plivo-xml`,
+      {
+        answerMethod: 'POST',
+        statusCallbackUrl: `${process.env.BASE_URL}/api/calls/status`,
+        statusCallbackMethod: 'POST'
+      }
+    );
+
+    // Store call details in Supabase
+    const { data, error } = await supabase
+      .from('calls')
+      .insert([{
+        call_uuid: response.requestUuid,
+        from_number: from,
+        to_number: to,
+        status: 'initiated',
+        created_at: new Date().toISOString()
+      }]);
+
+    if (error) throw error;
+
+    console.log('✅ Call initiated successfully:', response.requestUuid);
+
+    res.json({
+      success: true,
+      callId: response.requestUuid,
+      message: 'Call initiated successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Error initiating call:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to initiate call',
+      details: error.message
+    });
+  }
+});
+
+// Call status webhook
+app.post('/api/calls/status', async (req, res) => {
+  try {
+    const {
+      CallUUID,
+      CallStatus,
+      Duration,
+      TotalCost,
+      From,
+      To,
+      EndTime,
+      StartTime,
+      AnswerTime
+    } = req.body;
+
+    console.log(`📞 Call ${CallUUID} status update:`, CallStatus);
+
+    // Update call status in Supabase
+    const { error } = await supabase
+      .from('calls')
+      .update({
+        status: CallStatus,
+        duration: Duration,
+        cost: TotalCost,
+        end_time: EndTime,
+        start_time: StartTime,
+        answer_time: AnswerTime,
+        updated_at: new Date().toISOString()
+      })
+      .eq('call_uuid', CallUUID);
+
+    if (error) throw error;
+
+    res.status(200).send('Status updated');
+  } catch (error) {
+    console.error('❌ Error updating call status:', error);
+    res.status(500).json({ error: 'Failed to update call status' });
+  }
+});
+
+// Recording webhook
+app.post('/api/recording', async (req, res) => {
+  try {
+    const {
+      CallUUID,
+      RecordingURL,
+      RecordingID,
+      RecordingDuration,
+      RecordingStartTime,
+      RecordingEndTime
+    } = req.body;
+
+    console.log(`📝 Recording received for call ${CallUUID}`);
+
+    // Store recording details in Supabase
+    const { error } = await supabase
+      .from('call_recordings')
+      .insert([{
+        call_uuid: CallUUID,
+        recording_url: RecordingURL,
+        recording_id: RecordingID,
+        duration: RecordingDuration,
+        start_time: RecordingStartTime,
+        end_time: RecordingEndTime
+      }]);
+
+    if (error) throw error;
+
+    res.json({ message: 'Recording processed successfully' });
+  } catch (error) {
+    console.error('❌ Error processing recording:', error);
+    res.status(500).json({ error: 'Failed to process recording' });
+  }
+});
+
+// Stream status webhook
+app.post('/api/stream-status', async (req, res) => {
+  try {
+    const {
+      CallUUID,
+      StreamStatus,
+      ErrorCode,
+      ErrorMessage
+    } = req.body;
+
+    console.log(`🔄 Stream status for call ${CallUUID}: ${StreamStatus}`);
+    
+    if (ErrorCode) {
+      console.error(`❌ Stream error: ${ErrorCode} - ${ErrorMessage}`);
+    }
+
+    // Store stream status in Supabase
+    const { error } = await supabase
+      .from('stream_status')
+      .insert([{
+        call_uuid: CallUUID,
+        status: StreamStatus,
+        error_code: ErrorCode,
+        error_message: ErrorMessage,
+        timestamp: new Date().toISOString()
+      }]);
+
+    if (error) throw error;
+
+    res.json({ message: 'Stream status updated' });
+  } catch (error) {
+    console.error('❌ Error updating stream status:', error);
+    res.status(500).json({ error: 'Failed to update stream status' });
+  }
+});
+
