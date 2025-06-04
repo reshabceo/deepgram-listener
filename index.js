@@ -423,10 +423,11 @@ app.all('/plivo-xml', (req, res) => {
     statusCallbackUrl="https://bms123.app.n8n.cloud/webhook/stream-status" />
 </Response>`;
 
-  // Tell Plivo this is XML so it will parse it correctly
+  // Must send XML so Plivo parses it correctly:
   res.set('Content-Type', 'application/xml; charset=utf-8');
   res.send(xml);
 });
+
 
 // Constants for Deepgram connection
 const DEEPGRAM_CONFIG = {
