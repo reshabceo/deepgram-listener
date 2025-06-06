@@ -815,15 +815,21 @@ app.post('/api/calls/initiate', async (req, res) => {
       });
     }
 
+    // Log the Plivo credentials (masked)
+    console.log('📞 Plivo Auth ID:', `${process.env.PLIVO_AUTH_ID.slice(0, 4)}...`);
     console.log('📞 Initiating call from', from, 'to', to);
+
+    // Format the phone numbers to ensure E.164 format
+    const formattedFrom = from.startsWith('+') ? from : `+${from}`;
+    const formattedTo = to.startsWith('+') ? to : `+${to}`;
 
     const answerUrl = `${process.env.BASE_URL}/plivo-xml`;
     console.log('📞 Answer URL:', answerUrl);
 
-    // Create call using Plivo
+    // Create call using Plivo with more detailed options
     const response = await plivoClient.calls.create(
-      from,
-      to,
+      formattedFrom,
+      formattedTo,
       answerUrl,
       {
         answerMethod: 'GET',
@@ -834,15 +840,20 @@ app.post('/api/calls/initiate', async (req, res) => {
         machineDetectionUrl: `${process.env.BASE_URL}/api/machine-detection`,
         machineDetectionMethod: 'GET'
       }
-    );
+    ).catch(error => {
+      console.error('❌ Plivo API Error:', error.response ? error.response.body : error.message);
+      throw new Error(error.response ? error.response.body : error.message);
+    });
+
+    console.log('✅ Plivo Response:', response);
 
     // Store call details in Supabase
     const { data, error } = await supabase
       .from('calls')
       .insert([{
         call_uuid: response.requestUuid,
-        from_number: from,
-        to_number: to,
+        from_number: formattedFrom,
+        to_number: formattedTo,
         status: 'initiated',
         created_at: new Date().toISOString()
       }]);
@@ -862,7 +873,7 @@ app.post('/api/calls/initiate', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to initiate call',
-      details: error.message
+      details: error.message || 'Unknown error occurred'
     });
   }
 });
@@ -975,6 +986,35 @@ app.post('/api/stream-status', async (req, res) => {
   } catch (error) {
     console.error('❌ Error updating stream status:', error);
     res.status(500).json({ error: 'Failed to update stream status' });
+  }
+});
+
+// Add test endpoint for Plivo credentials
+app.get('/api/plivo/test', async (req, res) => {
+  try {
+    // Test Plivo credentials by getting account details
+    const account = await plivoClient.accounts.get(process.env.PLIVO_AUTH_ID);
+    console.log('✅ Plivo account verified:', account.accountType);
+    
+    // Get available numbers
+    const numbers = await plivoClient.numbers.list();
+    console.log('📱 Available Plivo numbers:', numbers);
+
+    res.json({
+      success: true,
+      account: {
+        type: account.accountType,
+        status: account.status,
+        numbers: numbers
+      }
+    });
+  } catch (error) {
+    console.error('❌ Plivo test failed:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to verify Plivo credentials',
+      details: error.message
+    });
   }
 });
 
