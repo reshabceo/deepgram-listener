@@ -451,10 +451,7 @@ async function generateAIResponse(callId, userMessage) {
         },
         body: JSON.stringify({
           model: 'gpt-3.5-turbo',
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: userMessage }
-          ],
+          messages: context.messages,
           temperature: 0.7,
           max_tokens: 100,
           top_p: 0.9
