@@ -1,5 +1,3 @@
-require('dotenv').config();
-
 const express = require('express');
 const expressWs = require('express-ws');
 const WebSocket = require('ws');
@@ -229,14 +227,17 @@ class TranscriptManager {
 
   async saveTranscript(callId, transcript, isFinal = true) {
     try {
+      // Format confidence to numeric(4,3) precision
+      const formattedConfidence = Number(transcript.confidence).toFixed(3);
+      
       const { data, error } = await supabase
         .from('transcripts')
         .insert([{
           call_uuid: callId,
-          transcript_text: transcript.text,
+          transcript: transcript.text,
           speaker: transcript.speaker || 'user',
-          confidence: transcript.confidence,
-          is_final: isFinal,
+          confidence: formattedConfidence,
+          is_processed: isFinal,
           timestamp: new Date().toISOString()
         }]);
 
