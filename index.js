@@ -328,6 +328,69 @@ function checkRateLimit() {
 // Initialize Plivo client
 const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
 
+// Add endpoint to list Plivo applications
+app.get('/api/plivo/list-apps', async (req, res) => {
+  try {
+    const applications = await plivoClient.applications.list();
+    
+    console.log('📱 Plivo applications:', applications);
+    
+    res.json({
+      success: true,
+      applications: applications
+    });
+  } catch (error) {
+    console.error('❌ Error listing applications:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to list applications',
+      details: error.message
+    });
+  }
+});
+
+// Add endpoint to create a new AI assistant application
+app.post('/api/plivo/create-ai-assistant', async (req, res) => {
+  try {
+    const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
+    
+    // Create params matching exactly Plivo's format
+    const params = {
+      answer_method: 'GET',
+      answer_url: `${baseUrl}/plivo-xml`,
+      app_name: String('AI Voice Assistant'), // Explicitly convert to string
+      application_type: 'XML',
+      default_app: false,
+      default_endpoint_app: false,
+      enabled: true,
+      fallback_method: 'POST',
+      hangup_method: 'POST',
+      hangup_url: `${baseUrl}/api/calls/status`,
+      log_incoming_message: true,
+      message_method: 'POST'
+    };
+
+    console.log('Creating application with params:', params);
+    
+    const application = await plivoClient.applications.create(params);
+
+    console.log('✅ AI Assistant application created:', application);
+
+    res.json({
+      success: true,
+      applicationId: application.appId,
+      message: 'AI Assistant application created successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error creating AI assistant application:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create AI assistant application',
+      details: error.message
+    });
+  }
+});
+
 const sendTTSResponse = async (ws, text) => {
   try {
     const cleanText = text.replace(/[<>]/g, "").trim();
@@ -1051,59 +1114,6 @@ app.get('/api/plivo/test', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to verify Plivo credentials',
-      details: error.message
-    });
-  }
-});
-
-// Add endpoint to list Plivo applications
-app.get('/api/plivo/list-apps', async (req, res) => {
-  try {
-    const applications = await plivoClient.applications.list();
-    
-    console.log('📱 Plivo applications:', applications);
-    
-    res.json({
-      success: true,
-      applications: applications
-    });
-  } catch (error) {
-    console.error('❌ Error listing applications:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to list applications',
-      details: error.message
-    });
-  }
-});
-
-// Add this endpoint to create a new AI assistant application
-app.post('/api/plivo/create-ai-assistant', async (req, res) => {
-  try {
-    const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
-    
-    const params = {
-      app_name: 'AI Voice Assistant',
-      answer_url: `${baseUrl}/plivo-xml`,
-      answer_method: 'GET'
-    };
-
-    console.log('Creating application with params:', params);
-    
-    const application = await plivoClient.applications.create(params);
-
-    console.log('✅ AI Assistant application created:', application);
-
-    res.json({
-      success: true,
-      applicationId: application.appId,
-      message: 'AI Assistant application created successfully'
-    });
-  } catch (error) {
-    console.error('❌ Error creating AI assistant application:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to create AI assistant application',
       details: error.message
     });
   }
