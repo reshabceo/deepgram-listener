@@ -368,7 +368,9 @@ const sendTTSResponse = async (ws, text) => {
     // Format the speak event
     const speakEvent = {
       event: 'speak',
-      payload: ttsXml
+      payload: ttsXml,
+      voice: 'Polly.Joanna',
+      language: 'en-US'
     };
     
     console.log("🎯 WebSocket State:", ws.readyState);
@@ -389,7 +391,7 @@ const sendTTSResponse = async (ws, text) => {
             
             if (parsed.event === 'media') {
               console.log("🎵 Media chunk received");
-            } else if (parsed.event === 'speak') {
+            } else if (parsed.event === 'speak' || parsed.event === 'speak_completed') {
               console.log("🔊 Speak event received:", parsed);
               clearTimeout(timeout);
               resolve();
@@ -406,11 +408,27 @@ const sendTTSResponse = async (ws, text) => {
           }
         };
 
+        // Add event listener before sending
+        ws.on('message', messageHandler);
+
         // Send the event
         ws.send(JSON.stringify(speakEvent));
 
-        // Listen for response
-        ws.once('message', messageHandler);
+        // Cleanup after response or timeout
+        const cleanup = () => {
+          clearTimeout(timeout);
+          ws.removeListener('message', messageHandler);
+        };
+
+        ws.once('speak_completed', () => {
+          cleanup();
+          resolve();
+        });
+
+        ws.once('error', (error) => {
+          cleanup();
+          reject(error);
+        });
       });
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
