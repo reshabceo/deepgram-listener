@@ -1063,13 +1063,13 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
     
     // Create a new application specifically for AI assistant
     const application = await plivoClient.applications.create({
-      appName: "AI Voice Assistant",
-      answerUrl: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
-      answerMethod: "GET",
-      hangupUrl: `${baseUrl}/api/calls/status`,
-      hangupMethod: "POST",
-      fallbackAnswerUrl: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
-      fallbackMethod: "GET"
+      app_name: "AI Voice Assistant",
+      answer_url: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
+      answer_method: "GET",
+      hangup_url: `${baseUrl}/api/calls/status`,
+      hangup_method: "POST",
+      fallback_answer_url: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
+      fallback_method: "GET"
     });
 
     console.log('✅ AI Assistant application created:', application);
