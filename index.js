@@ -332,21 +332,15 @@ const sendTTSResponse = async (ws, text) => {
   try {
     const cleanText = text.replace(/[<>]/g, "").trim();
 
-    // Create Plivo Response XML using the SDK
-    const response = new plivo.Response();
-    response.addSpeak(cleanText, {
-      voice: 'Polly.Joanna',
-      language: 'en-US'
-    });
-
-    // Format the speak event
+    // Correct format for Plivo WebSocket TTS
     const speakEvent = {
       event: "speak",
-      payload: response.toXML()
+      voice: "Polly.Joanna",
+      payload: cleanText  // Just the plain text, no XML wrapping
     };
 
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS XML:", response.toXML());
+    console.log("📝 Speak event:", JSON.stringify(speakEvent, null, 2));
 
     if (ws.readyState !== WebSocket.OPEN) {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
@@ -474,21 +468,21 @@ app.get('/', (req, res) => {
 
 // Replace your existing '/plivo-xml' handler with this exact block:
 app.all('/plivo-xml', (req, res) => {
-  console.log('📞 Generating Plivo XML response');
-  const baseUrl = process.env.BASE_URL.replace(/\/$/, ''); // remove trailing slash if any
+  const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
+  const callUUID = req.query.CallUUID || req.body.CallUUID || '';
+  const wsHost = baseUrl.replace(/^https?:\/\//, '');
 
-  // We removed <Record> entirely and fixed stray semicolons.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
-  <Stream 
+  <Stream
     streamTimeout="3600"
     keepCallAlive="true"
     bidirectional="true"
     contentType="audio/x-mulaw;rate=8000"
     track="inbound"
     statusCallbackUrl="${baseUrl}/api/stream-status"
-  >wss://${baseUrl.replace('https://', '')}/listen</Stream>
+  >wss://${wsHost}/listen?call_uuid=${callUUID}</Stream>
 </Response>`;
 
   console.log('📝 Generated XML:', xml);
@@ -572,13 +566,17 @@ class AudioBuffer {
 
 // Update the WebSocket listener section
 app.ws('/listen', async (plivoWs, req) => {
+  const callId = req.query.call_uuid;
+  if (!callId) {
+    console.error('❌ No call_uuid provided in WebSocket connection');
+    plivoWs.close();
+    return;
+  }
+
   console.log('📞 WebSocket /listen connected');
   let keepAliveInterval;
   let deepgramWs = null;
   const audioBuffer = new AudioBuffer();
-  
-  // Generate unique call ID
-  const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   // Initialize conversation context
   try {
@@ -842,10 +840,10 @@ app.ws('/api/calls/:callId/live-transcript', async (ws, req) => {
   });
 });
 
-// Call initiation endpoint
+// Update the call initiation endpoint
 app.post('/api/calls/initiate', async (req, res) => {
   try {
-    const { from, to } = req.body;
+    const { from, to, appId } = req.body;
     
     if (!from || !to) {
       return res.status(400).json({ 
@@ -861,55 +859,36 @@ app.post('/api/calls/initiate', async (req, res) => {
     // Ensure BASE_URL is properly formatted
     const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
     const answerUrl = `${baseUrl}/plivo-xml`;
-    
+
     console.log('📞 Initiating call from', formattedFrom, 'to', formattedTo);
     console.log('📞 Answer URL:', answerUrl);
 
-    // Create call using Plivo
+    // Create call using Plivo with optional appId
+    const callOptions = {
+      answerMethod: 'GET',
+      statusCallbackUrl: `${baseUrl}/api/calls/status`,
+      statusCallbackMethod: 'POST'
+    };
+
+    // Add applicationId if provided
+    if (appId) {
+      callOptions.applicationId = appId;
+    }
+
     const response = await plivoClient.calls.create(
       formattedFrom,
       formattedTo,
       answerUrl,
-      {
-        answerMethod: 'GET',
-        statusCallbackUrl: `${baseUrl}/api/calls/status`,
-        statusCallbackMethod: 'POST'
-      }
-    ).catch(error => {
-      console.error('❌ Plivo API Error:', error.response ? error.response.body : error.message);
-      throw new Error(error.response ? error.response.body : error.message);
-    });
-
-    console.log('✅ Plivo Response:', response);
-
-    // Store call details in Supabase - using requestUuid as call_uuid
-    const { data, error } = await supabase
-      .from('calls')
-      .insert([{
-        call_uuid: response.requestUuid,
-        from_number: formattedFrom,
-        to_number: formattedTo,
-        status: 'initiated',
-        call_type: 'inbound',
-        direction: 'INBOUND',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      }])
-      .select();
-
-    if (error) {
-      console.error('❌ Database Error:', error);
-      throw error;
-    }
+      callOptions
+    );
 
     console.log('✅ Call initiated successfully:', response.requestUuid);
 
     res.json({
       success: true,
-      callId: response.requestUuid,
+      requestId: response.requestUuid,
       message: 'Call initiated successfully'
     });
-
   } catch (error) {
     console.error('❌ Error initiating call:', error);
     res.status(500).json({
@@ -935,23 +914,40 @@ app.post('/api/calls/status', async (req, res) => {
       AnswerTime
     } = req.body;
 
-    console.log(`📞 Call ${CallUUID} status update:`, CallStatus);
-
-    // Update call status in Supabase
-    const { error } = await supabase
+    // Check if call record exists
+    const { data: existingCall } = await supabase
       .from('calls')
-      .update({
-        status: CallStatus,
-        duration: Duration,
-        cost: TotalCost,
-        end_time: EndTime,
-        start_time: StartTime,
-        answer_time: AnswerTime,
-        updated_at: new Date().toISOString()
-      })
-      .eq('call_uuid', CallUUID);
+      .select('call_uuid')
+      .eq('call_uuid', CallUUID)
+      .single();
 
-    if (error) throw error;
+    if (!existingCall && CallStatus === 'ringing') {
+      // Create new call record on first status update
+      await supabase
+        .from('calls')
+        .insert([{
+          call_uuid: CallUUID,
+          from_number: From,
+          to_number: To,
+          status: CallStatus,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }]);
+    } else {
+      // Update existing call record
+      await supabase
+        .from('calls')
+        .update({
+          status: CallStatus,
+          duration: Duration,
+          cost: TotalCost,
+          end_time: EndTime,
+          start_time: StartTime,
+          answer_time: AnswerTime,
+          updated_at: new Date().toISOString()
+        })
+        .eq('call_uuid', CallUUID);
+    }
 
     res.status(200).send('Status updated');
   } catch (error) {
@@ -1055,6 +1051,39 @@ app.get('/api/plivo/test', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to verify Plivo credentials',
+      details: error.message
+    });
+  }
+});
+
+// Add this endpoint to create a new AI assistant application
+app.post('/api/plivo/create-ai-assistant', async (req, res) => {
+  try {
+    const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
+    
+    // Create a new application specifically for AI assistant
+    const application = await plivoClient.applications.create({
+      appName: "AI Voice Assistant",
+      answerUrl: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
+      answerMethod: "GET",
+      hangupUrl: `${baseUrl}/api/calls/status`,
+      hangupMethod: "POST",
+      fallbackAnswerUrl: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
+      fallbackMethod: "GET"
+    });
+
+    console.log('✅ AI Assistant application created:', application);
+
+    res.json({
+      success: true,
+      applicationId: application.appId,
+      message: 'AI Assistant application created successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error creating AI assistant application:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create AI assistant application',
       details: error.message
     });
   }
