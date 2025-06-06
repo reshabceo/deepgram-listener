@@ -629,7 +629,7 @@ app.ws('/listen', async (plivoWs, req) => {
           call_uuid: callId,
           status: 'connected',
           call_type: 'outbound',
-          direction: 'outbound',  // Add direction field
+          direction: 'out',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }]);
@@ -902,7 +902,7 @@ app.post('/api/calls/initiate', async (req, res) => {
         to_number: formattedTo,
         status: 'initiated',
         call_type: 'outbound',
-        direction: 'outbound',  // Add direction field
+        direction: 'out',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
