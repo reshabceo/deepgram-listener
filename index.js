@@ -506,23 +506,23 @@ app.all('/plivo-xml', (req, res) => {
   const baseUrl = process.env.BASE_URL.replace(/\/$/, ''); // Remove trailing slash if present
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
+  <Response>
     <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
     <Record 
         action="${baseUrl}/api/recording"
-        redirect="false"
-        recordSession="true"
+      redirect="false"
+      recordSession="true"
         maxLength="3600" 
         startOnDialAnswer="true"/>
     <Stream 
-        streamTimeout="3600"
-        keepCallAlive="true"
-        bidirectional="true"
-        contentType="audio/x-mulaw;rate=8000"
+      streamTimeout="3600"
+      keepCallAlive="true"
+      bidirectional="true"
+      contentType="audio/x-mulaw;rate=8000"
         track="inbound"
         statusCallbackUrl="${baseUrl}/api/stream-status"
         >wss://${baseUrl.replace('https://', '')}/listen</Stream>
-</Response>`;
+  </Response>`;
   
   console.log('📝 Generated XML:', xml);
   res.set('Content-Type', 'text/xml');
@@ -551,10 +551,10 @@ async function initializeDeepgramWebSocket() {
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
-      headers: {
-        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
-      }
-    });
+    headers: {
+      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+    }
+  });
 
     const connectionTimeout = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
@@ -629,7 +629,7 @@ app.ws('/listen', async (plivoWs, req) => {
           call_uuid: callId,
           status: 'connected',
           call_type: 'outbound',
-          direction: 'out',
+          direction: 'inbound',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }]);
@@ -673,9 +673,9 @@ app.ws('/listen', async (plivoWs, req) => {
       
       // Set up Deepgram message handler
       deepgramWs.on('message', async (msg) => {
-        try {
-          const parsed = JSON.parse(msg.toString());
-          
+    try {
+      const parsed = JSON.parse(msg.toString());
+
           if (parsed.type === 'Results') {
             const transcript = parsed.channel?.alternatives?.[0];
             if (!transcript) return;
@@ -789,7 +789,7 @@ app.ws('/listen', async (plivoWs, req) => {
     if (keepAliveInterval) clearInterval(keepAliveInterval);
     if (processingTimeout) clearTimeout(processingTimeout);
     if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-      deepgramWs.close();
+    deepgramWs.close();
     }
     await conversationManager.endConversation(callId);
   };
@@ -902,7 +902,7 @@ app.post('/api/calls/initiate', async (req, res) => {
         to_number: formattedTo,
         status: 'initiated',
         call_type: 'outbound',
-        direction: 'out',
+        direction: 'inbound',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
       }])
