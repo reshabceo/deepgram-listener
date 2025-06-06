@@ -628,7 +628,7 @@ app.ws('/listen', async (plivoWs, req) => {
         .insert([{
           call_uuid: callId,
           status: 'connected',
-          call_type: 'outbound',
+          call_type: 'inbound',
           direction: 'inbound',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
@@ -901,7 +901,7 @@ app.post('/api/calls/initiate', async (req, res) => {
         from_number: formattedFrom,
         to_number: formattedTo,
         status: 'initiated',
-        call_type: 'outbound',
+        call_type: 'inbound',
         direction: 'inbound',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString()
