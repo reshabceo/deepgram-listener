@@ -362,10 +362,8 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
     const application = await plivoClient.applications.create(
       appName, 
       {
-        answerUrl:         answerUrl,
-        answerMethod:      "GET",
-        statusCallbackUrl: `${baseUrl}/api/calls/status`,
-        statusCallbackMethod: "POST"
+        answerUrl:    answerUrl,
+        answerMethod: "GET"
       }
     );
 
@@ -521,9 +519,6 @@ app.get('/', (req, res) => {
   res.send('✅ Deepgram Listener is running');
 });
 
-// ✅ Serve Plivo XML for both GET and POST
-// … earlier code unchanged …
-
 // Replace your existing '/plivo-xml' handler with this exact block:
 app.all('/plivo-xml', (req, res) => {
   const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
@@ -547,8 +542,6 @@ app.all('/plivo-xml', (req, res) => {
   res.set('Content-Type', 'text/xml');
   res.send(xml);
 });
-
-
 
 // Constants for API configuration
 const DEEPGRAM_CONFIG = {
