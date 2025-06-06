@@ -684,20 +684,13 @@ app.ws('/listen', async (plivoWs, req) => {
             
             console.log("🗣️ Transcribed:", transcriptText);
             
-            // Save transcript - now with better error handling
+            // Save transcript
             const savedTranscript = await transcriptManager.saveTranscript(callId, {
               text: transcriptText,
               confidence: transcript.confidence,
               speaker: parsed.speaker || 'user',
               is_final: !parsed.is_final
-            }).catch(err => {
-              console.error("❌ Failed to save transcript but continuing:", err);
-              return null;
             });
-
-            if (!savedTranscript) {
-              console.log("⚠️ Transcript not saved, continuing with processing");
-            }
 
             const context = conversationManager.getContext(callId);
             if (!context) {
@@ -725,17 +718,10 @@ app.ws('/listen', async (plivoWs, req) => {
                       text: aiResponse,
                       speaker: 'agent',
                       confidence: 1.0
-                    }).catch(err => {
-                      console.error("❌ Failed to save agent transcript but continuing:", err);
                     });
 
                     // Send TTS response
-                    await sendTTSResponse(plivoWs, aiResponse).catch(err => {
-                      console.error("❌ Failed to send TTS response:", err);
-                      // Try to send a fallback response
-                      const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-                      return sendTTSResponse(plivoWs, fallbackResponse);
-                    });
+                    await sendTTSResponse(plivoWs, aiResponse);
                   }
                 } catch (error) {
                   console.error("❌ AI/TTS error:", error);
@@ -746,38 +732,20 @@ app.ws('/listen', async (plivoWs, req) => {
                     text: fallbackResponse,
                     speaker: 'agent',
                     confidence: 1.0
-                  }).catch(err => {
-                    console.error("❌ Failed to save fallback transcript but continuing:", err);
                   });
                   
-                  await sendTTSResponse(plivoWs, fallbackResponse).catch(err => {
-                    console.error("❌ Failed to send fallback TTS response:", err);
-                  });
+                  await sendTTSResponse(plivoWs, fallbackResponse);
                 }
               }
             }
           }
         } catch (error) {
           console.error('❌ Error processing Deepgram message:', error);
-          // Don't rethrow - keep the connection alive
         }
-      });
-
-      // Add error and close handlers
-      deepgramWs.on('error', (error) => {
-        console.error('❌ Deepgram WebSocket error:', error);
-        // Don't close - let the connection retry logic handle it
-      });
-
-      deepgramWs.on('close', () => {
-        console.log('📢 Deepgram WebSocket closed - will attempt to reconnect');
-        setTimeout(connectToDeepgram, 1000); // Retry after 1 second
       });
 
     } catch (error) {
       console.error('❌ Failed to connect to Deepgram:', error);
-      // Retry connection after delay
-      setTimeout(connectToDeepgram, 2000);
     } finally {
       audioBuffer.isConnecting = false;
     }
