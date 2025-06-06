@@ -486,24 +486,29 @@ app.get('/', (req, res) => {
 // ✅ Serve Plivo XML for both GET and POST
 app.all('/plivo-xml', (req, res) => {
   console.log('📞 Generating Plivo XML response');
+  const baseUrl = process.env.BASE_URL.replace(/\/$/, ''); // Remove trailing slash if present
+  
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Record 
-    action="${process.env.BASE_URL}/api/recording"
-    redirect="false"
-    recordSession="true"
-    maxLength="3600" />
-  <Stream 
-    streamTimeout="3600"
-    keepCallAlive="true"
-    bidirectional="true"
-    contentType="audio/x-mulaw;rate=8000"
-    track="inbound"
-    statusCallbackUrl="${process.env.BASE_URL}/api/stream-status">
-    wss://${process.env.BASE_URL}/listen
-  </Stream>
+    <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
+    <Record 
+        action="${baseUrl}/api/recording"
+        redirect="false"
+        recordSession="true"
+        maxLength="3600" 
+        startOnDialAnswer="true"/>
+    <Stream 
+        streamTimeout="3600"
+        keepCallAlive="true"
+        bidirectional="true"
+        contentType="audio/x-mulaw;rate=8000"
+        track="inbound"
+        statusCallbackUrl="${baseUrl}/api/stream-status">
+        wss://${baseUrl.replace('https://', '')}/listen
+    </Stream>
 </Response>`;
   
+  console.log('📝 Generated XML:', xml);
   res.set('Content-Type', 'text/xml');
   res.send(xml);
 });
@@ -812,15 +817,22 @@ app.post('/api/calls/initiate', async (req, res) => {
 
     console.log('📞 Initiating call from', from, 'to', to);
 
+    const answerUrl = `${process.env.BASE_URL}/plivo-xml`;
+    console.log('📞 Answer URL:', answerUrl);
+
     // Create call using Plivo
     const response = await plivoClient.calls.create(
       from,
       to,
-      `${process.env.BASE_URL}/plivo-xml`,
+      answerUrl,
       {
-        answerMethod: 'POST',
+        answerMethod: 'GET',
         statusCallbackUrl: `${process.env.BASE_URL}/api/calls/status`,
-        statusCallbackMethod: 'POST'
+        statusCallbackMethod: 'POST',
+        machineDetection: 'true',
+        machineDetectionTime: 3000,
+        machineDetectionUrl: `${process.env.BASE_URL}/api/machine-detection`,
+        machineDetectionMethod: 'GET'
       }
     );
 
