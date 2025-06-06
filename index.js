@@ -325,21 +325,28 @@ function checkRateLimit() {
   return false;
 }
 
-// Update the TTS response format using Plivo SDK – send payload as XML string
+// Initialize Plivo client
+const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
+
 const sendTTSResponse = async (ws, text) => {
   try {
     const cleanText = text.replace(/[<>]/g, "").trim();
 
-    // Plivo expects payload to be an XML <Speak>…</Speak>
-    const ttsXml = `<Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>`;
+    // Create Plivo Response XML using the SDK
+    const response = new plivo.Response();
+    response.addSpeak(cleanText, {
+      voice: 'Polly.Joanna',
+      language: 'en-US'
+    });
 
+    // Format the speak event
     const speakEvent = {
       event: "speak",
-      payload: ttsXml
+      payload: response.toXML()
     };
 
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS XML (payload):", ttsXml);
+    console.log("📝 TTS XML:", response.toXML());
 
     if (ws.readyState !== WebSocket.OPEN) {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
@@ -834,9 +841,6 @@ app.ws('/api/calls/:callId/live-transcript', async (ws, req) => {
     // Clean up if needed
   });
 });
-
-// Initialize Plivo client
-const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
 
 // Call initiation endpoint
 app.post('/api/calls/initiate', async (req, res) => {
