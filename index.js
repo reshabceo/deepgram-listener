@@ -503,9 +503,8 @@ app.all('/plivo-xml', (req, res) => {
         bidirectional="true"
         contentType="audio/x-mulaw;rate=8000"
         track="inbound"
-        statusCallbackUrl="${baseUrl}/api/stream-status">
-        wss://${baseUrl.replace('https://', '')}/listen
-    </Stream>
+        statusCallbackUrl="${baseUrl}/api/stream-status"
+        >wss://${baseUrl.replace('https://', '')}/listen</Stream>
 </Response>`;
   
   console.log('📝 Generated XML:', xml);
