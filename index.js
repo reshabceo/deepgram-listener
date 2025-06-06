@@ -356,83 +356,58 @@ function checkRateLimit() {
 // Update the TTS response format using Plivo SDK
 const sendTTSResponse = async (ws, text) => {
   try {
-    // Clean and format the text for TTS
-    const cleanText = text.replace(/[<>]/g, '').trim();
-    
-    // Create simple Plivo Response XML
-    const ttsXml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>
-</Response>`;
-    
-    // Format the speak event
+    const cleanText = text.replace(/[<>]/g, "").trim();
+
+    // Build the XML payload that Plivo requires:
+    const ttsXml = `<Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>`;
+
     const speakEvent = {
-      event: 'speak',
-      payload: ttsXml,
-      voice: 'Polly.Joanna',
-      language: 'en-US'
+      event: "speak",
+      payload: ttsXml
     };
-    
+
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS XML:", ttsXml);
-    
-    if (ws.readyState === WebSocket.OPEN) {
-      console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
-      
-      // Send the speak event and wait for confirmation
-      return new Promise((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          reject(new Error('TTS response timeout'));
-        }, 5000);
+    console.log("📝 TTS XML (payload):", ttsXml);
 
-        const messageHandler = (response) => {
-          try {
-            const parsed = JSON.parse(response.toString());
-            
-            if (parsed.event === 'media') {
-              console.log("🎵 Media chunk received");
-            } else if (parsed.event === 'speak' || parsed.event === 'speak_completed') {
-              console.log("🔊 Speak event received:", parsed);
-              clearTimeout(timeout);
-              resolve();
-            } else if (parsed.event === 'error') {
-              console.error("❌ TTS error:", parsed);
-              clearTimeout(timeout);
-              reject(new Error('TTS error: ' + JSON.stringify(parsed)));
-            } else {
-              console.log("📥 Other Plivo event:", parsed.event);
-            }
-          } catch (err) {
-            console.error("❌ Error parsing Plivo response:", err);
-            console.error("Raw response:", response.toString().substring(0, 100));
-          }
-        };
-
-        // Add event listener before sending
-        ws.on('message', messageHandler);
-
-        // Send the event
-        ws.send(JSON.stringify(speakEvent));
-
-        // Cleanup after response or timeout
-        const cleanup = () => {
-          clearTimeout(timeout);
-          ws.removeListener('message', messageHandler);
-        };
-
-        ws.once('speak_completed', () => {
-          cleanup();
-          resolve();
-        });
-
-        ws.once('error', (error) => {
-          cleanup();
-          reject(error);
-        });
-      });
-    } else {
+    if (ws.readyState !== WebSocket.OPEN) {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
+
+    // Wrap the send in a Promise so you can await Plivo's acknowledgment:
+    return new Promise((resolve, reject) => {
+      // Timeout if Plivo never responds:
+      const timeout = setTimeout(() => {
+        ws.removeListener("message", messageHandler);
+        reject(new Error("TTS response timeout"));
+      }, 5000);
+
+      // Handle Plivo's messages back:
+      const messageHandler = (raw) => {
+        try {
+          const parsed = JSON.parse(raw.toString());
+          console.log("📥 Plivo event received:", parsed.event);
+          
+          if (parsed.event === "speak_completed") {
+            console.log("🔊 TTS completed successfully");
+            clearTimeout(timeout);
+            ws.removeListener("message", messageHandler);
+            resolve();
+          } else if (parsed.event === "error" || parsed.event === "incorrectPayload") {
+            console.error("❌ TTS error:", parsed);
+            clearTimeout(timeout);
+            ws.removeListener("message", messageHandler);
+            reject(new Error("TTS error: " + JSON.stringify(parsed)));
+          }
+          // Ignore other events ("media", etc.)
+        } catch (err) {
+          console.error("❌ Error parsing Plivo response:", err);
+        }
+      };
+
+      ws.on("message", messageHandler);
+      console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
+      ws.send(JSON.stringify(speakEvent));
+    });
   } catch (error) {
     console.error("❌ Error sending TTS response:", error);
     throw error;
