@@ -1061,16 +1061,15 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
     
-    // Create a new application specifically for AI assistant
-    const application = await plivoClient.applications.create({
-      app_name: "AI Voice Assistant",
-      answer_url: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
-      answer_method: "GET",
-      hangup_url: `${baseUrl}/api/calls/status`,
-      hangup_method: "POST",
-      fallback_answer_url: `${baseUrl}/plivo-xml?CallUUID={{CallUUID}}`,
-      fallback_method: "GET"
-    });
+    // Create a new application with minimal parameters
+    const params = {
+      app_name: 'AI Voice Assistant',
+      answer_url: `${baseUrl}/plivo-xml`
+    };
+
+    console.log('Creating application with params:', params);
+    
+    const application = await plivoClient.applications.create(params);
 
     console.log('✅ AI Assistant application created:', application);
 
@@ -1080,11 +1079,12 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
       message: 'AI Assistant application created successfully'
     });
   } catch (error) {
-    console.error('❌ Error creating AI assistant application:', error);
+    console.error('❌ Error creating AI assistant application:', error, error.stack);
     res.status(500).json({
       success: false,
       error: 'Failed to create AI assistant application',
-      details: error.message
+      details: error.message,
+      stack: error.stack
     });
   }
 });
