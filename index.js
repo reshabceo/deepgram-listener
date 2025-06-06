@@ -41,8 +41,8 @@ const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
-// Update the system prompt to be more focused
-const SYSTEM_PROMPT = `You are a helpful phone assistant. Keep responses brief, natural, and focused. You should be professional but conversational.`;
+// Update the system prompt to be more focused on voice interaction
+const SYSTEM_PROMPT = `You are a voice-based AI assistant on a phone call. You can hear the caller through speech recognition and respond verbally. Keep responses brief, natural, and focused. You should be professional but conversational. Never say you are a text-based assistant or that you cannot hear - you CAN hear through speech recognition.`;
 
 // Supabase client
 const supabase = createClient(
@@ -81,7 +81,7 @@ class ConversationManager {
     const context = {
       messages: [{
         role: "system",
-        content: `You are a helpful phone assistant. Keep responses brief and natural. Be professional and focused.`
+        content: SYSTEM_PROMPT
       }],
       lastProcessedTime: Date.now(),
       transcriptBuffer: '',
@@ -358,30 +358,28 @@ const sendTTSResponse = async (ws, text) => {
   try {
     const cleanText = text.replace(/[<>]/g, "").trim();
 
-    // Build the XML payload that Plivo requires:
-    const ttsXml = `<Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>`;
-
+    // Plivo expects this exact format
     const speakEvent = {
       event: "speak",
-      payload: ttsXml
+      payload: {
+        text: cleanText,
+        voice: "Polly.Joanna"
+      }
     };
 
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 TTS XML (payload):", ttsXml);
+    console.log("📝 Speak event:", JSON.stringify(speakEvent, null, 2));
 
     if (ws.readyState !== WebSocket.OPEN) {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
 
-    // Wrap the send in a Promise so you can await Plivo's acknowledgment:
     return new Promise((resolve, reject) => {
-      // Timeout if Plivo never responds:
       const timeout = setTimeout(() => {
         ws.removeListener("message", messageHandler);
         reject(new Error("TTS response timeout"));
       }, 5000);
 
-      // Handle Plivo's messages back:
       const messageHandler = (raw) => {
         try {
           const parsed = JSON.parse(raw.toString());
@@ -398,14 +396,12 @@ const sendTTSResponse = async (ws, text) => {
             ws.removeListener("message", messageHandler);
             reject(new Error("TTS error: " + JSON.stringify(parsed)));
           }
-          // Ignore other events ("media", etc.)
         } catch (err) {
           console.error("❌ Error parsing Plivo response:", err);
         }
       };
 
       ws.on("message", messageHandler);
-      console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
       ws.send(JSON.stringify(speakEvent));
     });
   } catch (error) {
