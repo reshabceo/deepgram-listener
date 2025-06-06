@@ -463,33 +463,35 @@ app.get('/', (req, res) => {
 });
 
 // ✅ Serve Plivo XML for both GET and POST
+// … earlier code unchanged …
+
+// Replace your existing /plivo-xml handler with this:
 app.all('/plivo-xml', (req, res) => {
   console.log('📞 Generating Plivo XML response');
-  const baseUrl = process.env.BASE_URL.replace(/\/$/, ''); // Remove trailing slash if present
-  
+  const baseUrl = process.env.BASE_URL.replace(/\/$/, ''); // remove trailing slash if any
+
+  // We removed <Record> (so Plivo goes straight into streaming) 
+  // and deleted all stray semicolons inside attributes.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
-  <Response>
-    <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
-    <Record 
-        action="${baseUrl}/api/recording"
-        redirect="false"
-        recordSession="true"
-        maxLength="3600" 
-        startOnDialAnswer="true"
-        silenceTimeout="3600"/>
-    <Stream 
-      streamTimeout="3600"
-      keepCallAlive="true"
-      bidirectional="true"
-      contentType="audio/x-mulaw;rate=8000"
-      track="inbound"
-      statusCallbackUrl="${baseUrl}/api/stream-status"
-      >wss://${baseUrl.replace('https://', '')}/listen</Stream>
-  </Response>`;
-  
+<Response>
+  <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
+  <Stream 
+    streamTimeout="3600"
+    keepCallAlive="true"
+    bidirectional="true"
+    contentType="audio/x-mulaw;rate=8000"
+    track="inbound"
+    statusCallbackUrl="${baseUrl}/api/stream-status"
+  >wss://${baseUrl.replace('https://', '')}/listen</Stream>
+</Response>`;
+
   console.log('📝 Generated XML:', xml);
   res.set('Content-Type', 'text/xml');
   res.send(xml);
+});
+
+// … remaining code unchanged …
+
 });
 
 // Constants for API configuration
