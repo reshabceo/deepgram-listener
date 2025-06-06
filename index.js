@@ -814,30 +814,26 @@ app.post('/api/calls/initiate', async (req, res) => {
       });
     }
 
-    // Log the Plivo credentials (masked)
-    console.log('📞 Plivo Auth ID:', `${process.env.PLIVO_AUTH_ID.slice(0, 4)}...`);
-    console.log('📞 Initiating call from', from, 'to', to);
-
     // Format the phone numbers to ensure E.164 format
     const formattedFrom = from.startsWith('+') ? from : `+${from}`;
     const formattedTo = to.startsWith('+') ? to : `+${to}`;
 
-    const answerUrl = `${process.env.BASE_URL}/plivo-xml`;
+    // Ensure BASE_URL is properly formatted
+    const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
+    const answerUrl = `${baseUrl}/plivo-xml`;
+    
+    console.log('📞 Initiating call from', formattedFrom, 'to', formattedTo);
     console.log('📞 Answer URL:', answerUrl);
 
-    // Create call using Plivo with more detailed options
+    // Create call using Plivo
     const response = await plivoClient.calls.create(
       formattedFrom,
       formattedTo,
       answerUrl,
       {
         answerMethod: 'GET',
-        statusCallbackUrl: `${process.env.BASE_URL}/api/calls/status`,
-        statusCallbackMethod: 'POST',
-        machineDetection: 'true',
-        machineDetectionTime: 3000,
-        machineDetectionUrl: `${process.env.BASE_URL}/api/machine-detection`,
-        machineDetectionMethod: 'GET'
+        statusCallbackUrl: `${baseUrl}/api/calls/status`,
+        statusCallbackMethod: 'POST'
       }
     ).catch(error => {
       console.error('❌ Plivo API Error:', error.response ? error.response.body : error.message);
