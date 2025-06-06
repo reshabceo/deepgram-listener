@@ -373,41 +373,51 @@ const sendTTSResponse = async (ws, text) => {
     
     console.log("🎯 WebSocket State:", ws.readyState);
     console.log("📝 TTS XML:", ttsXml);
-    console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
     
     if (ws.readyState === WebSocket.OPEN) {
-      // Send the speak event
-      ws.send(JSON.stringify(speakEvent));
+      console.log("📤 Sending speak event:", JSON.stringify(speakEvent, null, 2));
       
-      // Add message handler for Plivo responses
-      const messageHandler = (response) => {
-        try {
-          const parsed = JSON.parse(response.toString());
-          
-          if (parsed.event === 'media') {
-            console.log("🎵 Media chunk received");
-          } else if (parsed.event === 'speak') {
-            console.log("🔊 Speak event received:", parsed);
-          } else if (parsed.event === 'error') {
-            console.error("❌ TTS error:", parsed);
-          } else {
-            console.log("📥 Other Plivo event:", parsed.event);
-          }
-        } catch (err) {
-          console.error("❌ Error parsing Plivo response:", err);
-          console.error("Raw response:", response.toString().substring(0, 100));
-        }
-      };
+      // Send the speak event and wait for confirmation
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('TTS response timeout'));
+        }, 5000);
 
-      // Listen for multiple messages
-      for (let i = 0; i < 5; i++) {
+        const messageHandler = (response) => {
+          try {
+            const parsed = JSON.parse(response.toString());
+            
+            if (parsed.event === 'media') {
+              console.log("🎵 Media chunk received");
+            } else if (parsed.event === 'speak') {
+              console.log("🔊 Speak event received:", parsed);
+              clearTimeout(timeout);
+              resolve();
+            } else if (parsed.event === 'error') {
+              console.error("❌ TTS error:", parsed);
+              clearTimeout(timeout);
+              reject(new Error('TTS error: ' + JSON.stringify(parsed)));
+            } else {
+              console.log("📥 Other Plivo event:", parsed.event);
+            }
+          } catch (err) {
+            console.error("❌ Error parsing Plivo response:", err);
+            console.error("Raw response:", response.toString().substring(0, 100));
+          }
+        };
+
+        // Send the event
+        ws.send(JSON.stringify(speakEvent));
+
+        // Listen for response
         ws.once('message', messageHandler);
-      }
+      });
     } else {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
   } catch (error) {
     console.error("❌ Error sending TTS response:", error);
+    throw error;
   }
 };
 
@@ -722,8 +732,27 @@ app.ws('/listen', async (plivoWs, req) => {
                       confidence: 1.0
                     });
 
-                    // Send TTS response
-                    await sendTTSResponse(plivoWs, aiResponse);
+                    // Send TTS response with retries
+                    let retryCount = 0;
+                    const maxRetries = 3;
+                    
+                    while (retryCount < maxRetries) {
+                      try {
+                        await sendTTSResponse(plivoWs, aiResponse);
+                        console.log("✅ TTS response sent successfully");
+                        break;
+                      } catch (ttsError) {
+                        console.error(`❌ TTS error (attempt ${retryCount + 1}/${maxRetries}):`, ttsError);
+                        retryCount++;
+                        if (retryCount === maxRetries) {
+                          console.error("❌ Max TTS retries reached, using fallback");
+                          const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+                          await sendTTSResponse(plivoWs, fallbackResponse);
+                        } else {
+                          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1s before retry
+                        }
+                      }
+                    }
                   }
                 } catch (error) {
                   console.error("❌ AI/TTS error:", error);
@@ -736,7 +765,11 @@ app.ws('/listen', async (plivoWs, req) => {
                     confidence: 1.0
                   });
                   
-                  await sendTTSResponse(plivoWs, fallbackResponse);
+                  try {
+                    await sendTTSResponse(plivoWs, fallbackResponse);
+                  } catch (ttsError) {
+                    console.error("❌ Failed to send fallback response:", ttsError);
+                  }
                 }
               }
             }
@@ -787,27 +820,44 @@ app.ws('/listen', async (plivoWs, req) => {
 
   // Clean up
   const cleanup = async () => {
-    if (keepAliveInterval) clearInterval(keepAliveInterval);
-    if (processingTimeout) clearTimeout(processingTimeout);
-    if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-    deepgramWs.close();
+    console.log('🧹 Starting cleanup for call:', callId);
+    try {
+      if (keepAliveInterval) {
+        console.log('Clearing keepAlive interval');
+        clearInterval(keepAliveInterval);
+      }
+      if (processingTimeout) {
+        console.log('Clearing processing timeout');
+        clearTimeout(processingTimeout);
+      }
+      if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+        console.log('Closing Deepgram WebSocket');
+        deepgramWs.close();
+      }
+      console.log('Ending conversation');
+      await conversationManager.endConversation(callId);
+    } catch (error) {
+      console.error('❌ Error during cleanup:', error);
     }
-    await conversationManager.endConversation(callId);
   };
 
-  plivoWs.on('close', cleanup);
-});
+  // Set up keepalive
+  keepAliveInterval = setInterval(() => {
+    if (plivoWs.readyState === WebSocket.OPEN) {
+      console.log('💓 Sending keepalive ping');
+      plivoWs.ping();
+    }
+  }, KEEP_ALIVE_INTERVAL);
 
-// Keep Railway container alive with proper interval cleanup
-let keepAliveInterval = setInterval(() => {}, 1000);
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  clearInterval(keepAliveInterval);
-  wsInstance.getWss().clients.forEach(client => {
-    client.close();
+  // Only cleanup on explicit close
+  plivoWs.on('close', () => {
+    console.log('📞 Plivo WebSocket closed, initiating cleanup');
+    cleanup();
   });
-  process.exit(0);
+
+  plivoWs.on('error', (error) => {
+    console.error('❌ Plivo WebSocket error:', error);
+  });
 });
 
 // Start server
