@@ -510,18 +510,19 @@ app.all('/plivo-xml', (req, res) => {
     <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
     <Record 
         action="${baseUrl}/api/recording"
-      redirect="false"
-      recordSession="true"
+        redirect="false"
+        recordSession="true"
         maxLength="3600" 
-        startOnDialAnswer="true"/>
+        startOnDialAnswer="true"
+        silenceTimeout="3600"/>
     <Stream 
       streamTimeout="3600"
       keepCallAlive="true"
       bidirectional="true"
       contentType="audio/x-mulaw;rate=8000"
-        track="inbound"
-        statusCallbackUrl="${baseUrl}/api/stream-status"
-        >wss://${baseUrl.replace('https://', '')}/listen</Stream>
+      track="inbound"
+      statusCallbackUrl="${baseUrl}/api/stream-status"
+      >wss://${baseUrl.replace('https://', '')}/listen</Stream>
   </Response>`;
   
   console.log('📝 Generated XML:', xml);
