@@ -1056,15 +1056,36 @@ app.get('/api/plivo/test', async (req, res) => {
   }
 });
 
+// Add endpoint to list Plivo applications
+app.get('/api/plivo/list-apps', async (req, res) => {
+  try {
+    const applications = await plivoClient.applications.list();
+    
+    console.log('📱 Plivo applications:', applications);
+    
+    res.json({
+      success: true,
+      applications: applications
+    });
+  } catch (error) {
+    console.error('❌ Error listing applications:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to list applications',
+      details: error.message
+    });
+  }
+});
+
 // Add this endpoint to create a new AI assistant application
 app.post('/api/plivo/create-ai-assistant', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
     
-    // Create a new application with minimal parameters
     const params = {
       app_name: 'AI Voice Assistant',
-      answer_url: `${baseUrl}/plivo-xml`
+      answer_url: `${baseUrl}/plivo-xml`,
+      answer_method: 'GET'
     };
 
     console.log('Creating application with params:', params);
@@ -1079,12 +1100,11 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
       message: 'AI Assistant application created successfully'
     });
   } catch (error) {
-    console.error('❌ Error creating AI assistant application:', error, error.stack);
+    console.error('❌ Error creating AI assistant application:', error);
     res.status(500).json({
       success: false,
       error: 'Failed to create AI assistant application',
-      details: error.message,
-      stack: error.stack
+      details: error.message
     });
   }
 });
