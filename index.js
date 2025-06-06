@@ -227,6 +227,18 @@ class TranscriptManager {
 
   async saveTranscript(callId, transcript, isFinal = true) {
     try {
+      // First verify call exists
+      const { data: callExists, error: callCheckError } = await supabase
+        .from('calls')
+        .select('call_uuid')
+        .eq('call_uuid', callId)
+        .single();
+
+      if (callCheckError || !callExists) {
+        console.error(`❌ Call ${callId} not found in database`);
+        return null;
+      }
+
       // Format confidence to numeric(4,3) precision
       const formattedConfidence = Number(transcript.confidence).toFixed(3);
       
@@ -241,12 +253,16 @@ class TranscriptManager {
           timestamp: new Date().toISOString()
         }]);
 
-      if (error) throw error;
+      if (error) {
+        console.error('❌ Error inserting transcript:', error);
+        return null;
+      }
+      
       console.log(`💾 Saved transcript for call ${callId}`);
       return data;
     } catch (error) {
       console.error('❌ Error saving transcript:', error);
-      throw error;
+      return null;  // Return null instead of throwing to prevent cascade failures
     }
   }
 
@@ -597,11 +613,42 @@ app.ws('/listen', async (plivoWs, req) => {
   const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   // Initialize conversation context
-  await conversationManager.initializeContext(callId).catch(err => {
-    console.error('❌ Failed to initialize conversation:', err);
+  try {
+    // First, ensure call record exists or create it
+    const { data: existingCall, error: checkError } = await supabase
+      .from('calls')
+      .select('call_uuid')
+      .eq('call_uuid', callId)
+      .single();
+
+    if (!existingCall) {
+      // Create call record if it doesn't exist
+      const { error: createError } = await supabase
+        .from('calls')
+        .insert([{
+          call_uuid: callId,
+          status: 'connected',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }]);
+
+      if (createError) {
+        console.error('❌ Failed to create call record:', createError);
+        plivoWs.close();
+        return;
+      }
+    }
+
+    await conversationManager.initializeContext(callId).catch(err => {
+      console.error('❌ Failed to initialize conversation:', err);
+      plivoWs.close();
+      return;
+    });
+  } catch (err) {
+    console.error('❌ Failed to setup call:', err);
     plivoWs.close();
     return;
-  });
+  }
 
   // Function to connect to Deepgram
   const connectToDeepgram = async () => {
@@ -636,13 +683,17 @@ app.ws('/listen', async (plivoWs, req) => {
             
             console.log("🗣️ Transcribed:", transcriptText);
             
-            // Save transcript
-            await transcriptManager.saveTranscript(callId, {
+            // Save transcript - now with better error handling
+            const savedTranscript = await transcriptManager.saveTranscript(callId, {
               text: transcriptText,
               confidence: transcript.confidence,
               speaker: parsed.speaker || 'user',
               is_final: !parsed.is_final
             });
+
+            if (!savedTranscript) {
+              console.log("⚠️ Transcript not saved, continuing with processing");
+            }
 
             const context = conversationManager.getContext(callId);
             if (!context) {
@@ -662,18 +713,19 @@ app.ws('/listen', async (plivoWs, req) => {
                 try {
                   // Generate AI response
                   const aiResponse = await generateAIResponse(callId, fullUtterance);
-                  console.log("🤖 AI Response:", aiResponse);
-                  
-                  // Save agent's response transcript
-                  await transcriptManager.saveTranscript(callId, {
-                    text: aiResponse,
-                    speaker: 'agent',
-                    confidence: 1.0
-                  });
+                  if (aiResponse) {
+                    console.log("🤖 AI Response:", aiResponse);
+                    
+                    // Save agent's response transcript
+                    await transcriptManager.saveTranscript(callId, {
+                      text: aiResponse,
+                      speaker: 'agent',
+                      confidence: 1.0
+                    });
 
-                  // Send TTS response
-                  await sendTTSResponse(plivoWs, aiResponse);
-
+                    // Send TTS response
+                    await sendTTSResponse(plivoWs, aiResponse);
+                  }
                 } catch (error) {
                   console.error("❌ AI/TTS error:", error);
                   const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
@@ -843,7 +895,7 @@ app.post('/api/calls/initiate', async (req, res) => {
 
     console.log('✅ Plivo Response:', response);
 
-    // Store call details in Supabase
+    // Store call details in Supabase - using requestUuid as call_uuid
     const { data, error } = await supabase
       .from('calls')
       .insert([{
@@ -851,10 +903,15 @@ app.post('/api/calls/initiate', async (req, res) => {
         from_number: formattedFrom,
         to_number: formattedTo,
         status: 'initiated',
-        created_at: new Date().toISOString()
-      }]);
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      }])
+      .select();
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Database Error:', error);
+      throw error;
+    }
 
     console.log('✅ Call initiated successfully:', response.requestUuid);
 
