@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const expressWs = require('express-ws');
 const WebSocket = require('ws');
@@ -42,7 +44,7 @@ const RECONNECT_DELAY = 2000; // 2 seconds
 const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
 // Update the system prompt to be more focused on voice interaction
-const SYSTEM_PROMPT = `You are a voice-based AI assistant on a phone call. You can hear the caller through speech recognition and respond verbally. Keep responses brief, natural, and focused. You should be professional but conversational. Never say you are a text-based assistant or that you cannot hear - you CAN hear through speech recognition.`;
+const SYSTEM_PROMPT = `You are a voice-based AI assistant on a phone call. You can hear the caller through speech recognition and respond verbally. Keep responses brief, natural, and focused. You should be professional but conversational. Never say you are a text-based assistant or that you cannot hear – you CAN hear through speech recognition.`;
 
 // Supabase client
 const supabase = createClient(
@@ -262,7 +264,7 @@ class TranscriptManager {
       return data;
     } catch (error) {
       console.error('❌ Error saving transcript:', error);
-      return null;  // Return null instead of throwing to prevent cascade failures
+      return null;
     }
   }
 
@@ -353,27 +355,27 @@ function checkRateLimit() {
   return false;
 }
 
-// Update the TTS response format using Plivo SDK
+// Update the TTS response format using Plivo SDK – send payload as XML string
 const sendTTSResponse = async (ws, text) => {
   try {
     const cleanText = text.replace(/[<>]/g, "").trim();
 
-    // Plivo expects this exact format
+    // Plivo expects this exact format: payload must be an XML <Speak>…</Speak>
+    const ttsXml = `<Speak voice="Polly.Joanna" language="en-US">${cleanText}</Speak>`;
+
     const speakEvent = {
       event: "speak",
-      payload: {
-        text: cleanText,
-        voice: "Polly.Joanna"
-      }
+      payload: ttsXml
     };
 
     console.log("🎯 WebSocket State:", ws.readyState);
-    console.log("📝 Speak event:", JSON.stringify(speakEvent, null, 2));
+    console.log("📝 TTS XML (payload):", ttsXml);
 
     if (ws.readyState !== WebSocket.OPEN) {
       throw new Error(`WebSocket not open (State: ${ws.readyState})`);
     }
 
+    // Return a promise that resolves when Plivo sends "speak_completed"
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         ws.removeListener("message", messageHandler);
@@ -548,10 +550,10 @@ async function initializeDeepgramWebSocket() {
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
-    headers: {
-      Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
-    }
-  });
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+      }
+    });
 
     const connectionTimeout = setTimeout(() => {
       if (ws.readyState !== WebSocket.OPEN) {
@@ -670,9 +672,8 @@ app.ws('/listen', async (plivoWs, req) => {
       
       // Set up Deepgram message handler
       deepgramWs.on('message', async (msg) => {
-    try {
-      const parsed = JSON.parse(msg.toString());
-
+        try {
+          const parsed = JSON.parse(msg.toString());
           if (parsed.type === 'Results') {
             const transcript = parsed.channel?.alternatives?.[0];
             if (!transcript) return;
@@ -683,7 +684,7 @@ app.ws('/listen', async (plivoWs, req) => {
             console.log("🗣️ Transcribed:", transcriptText);
             
             // Save transcript
-            const savedTranscript = await transcriptManager.saveTranscript(callId, {
+            await transcriptManager.saveTranscript(callId, {
               text: transcriptText,
               confidence: transcript.confidence,
               speaker: parsed.speaker || 'user',
@@ -764,7 +765,6 @@ app.ws('/listen', async (plivoWs, req) => {
           console.error('❌ Error processing Deepgram message:', error);
         }
       });
-
     } catch (error) {
       console.error('❌ Failed to connect to Deepgram:', error);
     } finally {
@@ -1107,4 +1107,3 @@ app.get('/api/plivo/test', async (req, res) => {
     });
   }
 });
-
