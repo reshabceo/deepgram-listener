@@ -465,13 +465,12 @@ app.get('/', (req, res) => {
 // ✅ Serve Plivo XML for both GET and POST
 // … earlier code unchanged …
 
-// Replace your existing /plivo-xml handler with this:
+// Replace your existing '/plivo-xml' handler with this exact block:
 app.all('/plivo-xml', (req, res) => {
   console.log('📞 Generating Plivo XML response');
   const baseUrl = process.env.BASE_URL.replace(/\/$/, ''); // remove trailing slash if any
 
-  // We removed <Record> (so Plivo goes straight into streaming) 
-  // and deleted all stray semicolons inside attributes.
+  // We removed <Record> entirely and fixed stray semicolons.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
@@ -490,9 +489,7 @@ app.all('/plivo-xml', (req, res) => {
   res.send(xml);
 });
 
-// … remaining code unchanged …
 
-});
 
 // Constants for API configuration
 const DEEPGRAM_CONFIG = {
