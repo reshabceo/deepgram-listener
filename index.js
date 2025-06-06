@@ -354,25 +354,16 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
     
-    // Create params matching exactly Plivo's format
-    const params = {
-      answer_method: 'GET',
-      answer_url: `${baseUrl}/plivo-xml`,
-      app_name: String('AI Voice Assistant'), // Explicitly convert to string
-      application_type: 'XML',
-      default_app: false,
-      default_endpoint_app: false,
-      enabled: true,
-      fallback_method: 'POST',
-      hangup_method: 'POST',
-      hangup_url: `${baseUrl}/api/calls/status`,
-      log_incoming_message: true,
-      message_method: 'POST'
-    };
-
-    console.log('Creating application with params:', params);
+    // Create application with minimal required parameters
+    const appName = "AI Voice Assistant";  // Define as a separate string variable
+    const answerUrl = `${baseUrl}/plivo-xml`;
     
-    const application = await plivoClient.applications.create(params);
+    console.log('Creating application with name:', appName, 'and URL:', answerUrl);
+    
+    const application = await plivoClient.applications.create(
+      appName,  // First parameter is app_name
+      answerUrl // Second parameter is answer_url
+    );
 
     console.log('✅ AI Assistant application created:', application);
 
