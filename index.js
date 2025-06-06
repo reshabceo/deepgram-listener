@@ -27,7 +27,7 @@ for (const envVar of requiredEnvVars) {
 }
 
 const app = express();
-const wsInstance = expressWs(app);
+expressWs(app);
 
 // Add middleware
 app.use(express.json());
@@ -35,13 +35,9 @@ app.use(express.urlencoded({ extended: true }));
 
 const port = process.env.PORT || 3000;
 const KEEP_ALIVE_INTERVAL = 30000; // 30 seconds
-const PROCESSING_TIMEOUT = 60000; // 60 seconds
 const RATE_LIMIT_WINDOW = 60000; // 1 minute
 const MAX_REQUESTS_PER_WINDOW = 50;
 const requestTimestamps = [];
-const MAX_RECONNECT_ATTEMPTS = 3;
-const RECONNECT_DELAY = 2000; // 2 seconds
-const CONNECTION_TIMEOUT = 5000; // 5 seconds
 
 // Update the system prompt to be more focused on voice interaction
 const SYSTEM_PROMPT = `You are a voice-based AI assistant on a phone call. You can hear the caller through speech recognition and respond verbally. Keep responses brief, natural, and focused. You should be professional but conversational. Never say you are a text-based assistant or that you cannot hear – you CAN hear through speech recognition.`;
@@ -58,7 +54,7 @@ const supabase = createClient(
   }
 );
 
-// Update FALLBACK_RESPONSES to be clear and natural
+// Fallback responses
 const FALLBACK_RESPONSES = [
   "Hello, I can hear you.",
   "Yes, I'm listening.",
@@ -79,19 +75,12 @@ class ConversationManager {
 
   async initializeContext(callId) {
     console.log("🎯 Initializing context for call:", callId);
-    
     const context = {
-      messages: [{
-        role: "system",
-        content: SYSTEM_PROMPT
-      }],
+      messages: [{ role: "system", content: SYSTEM_PROMPT }],
       transcriptBuffer: '',
       startTime: Date.now()
     };
-
     this.contexts.set(callId, context);
-    
-    // Initialize metrics with timestamps
     this.metrics.set(callId, {
       startTime: Date.now(),
       userSpeakingTime: 0,
@@ -101,9 +90,7 @@ class ConversationManager {
       responseTimes: [],
       lastMetricUpdate: Date.now()
     });
-    
     try {
-      // Store conversation start in Supabase
       await supabase.from('conversations').insert([{
         call_id: callId,
         start_time: new Date().toISOString(),
@@ -124,7 +111,6 @@ class ConversationManager {
     const context = this.getContext(callId);
     if (context) {
       context.messages.push(message);
-      // Keep context window manageable
       if (context.messages.length > 10) {
         context.messages = [
           context.messages[0],
@@ -136,11 +122,9 @@ class ConversationManager {
 
   updateMetrics(callId, type, duration) {
     console.log(`📊 Updating metrics for ${callId} - Type: ${type}, Duration: ${duration}ms`);
-    
     const metrics = this.metrics.get(callId);
     if (metrics) {
       const now = Date.now();
-      
       switch (type) {
         case 'user_speaking':
           metrics.userSpeakingTime += duration;
@@ -156,7 +140,6 @@ class ConversationManager {
           metrics.turnCount++;
           break;
       }
-      
       metrics.lastMetricUpdate = now;
       console.log(`📊 Updated metrics for ${callId}:`, metrics);
     } else {
@@ -166,17 +149,14 @@ class ConversationManager {
 
   async endConversation(callId) {
     console.log(`🔚 Ending conversation for call: ${callId}`);
-    
     try {
       const metrics = this.metrics.get(callId);
       const endTime = Date.now();
-      
       if (metrics) {
         const totalDuration = endTime - metrics.startTime;
-        const avgResponseTime = metrics.responseTimes.length > 0 
-          ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length 
+        const avgResponseTime = metrics.responseTimes.length > 0
+          ? metrics.responseTimes.reduce((a, b) => a + b, 0) / metrics.responseTimes.length
           : 0;
-
         console.log(`📊 Final metrics for ${callId}:`, {
           totalDuration,
           userSpeakingTime: metrics.userSpeakingTime,
@@ -185,16 +165,9 @@ class ConversationManager {
           turnCount: metrics.turnCount,
           avgResponseTime
         });
-
-        // Update conversation status
         await supabase.from('conversations')
-          .update({
-            end_time: new Date().toISOString(),
-            status: 'completed'
-          })
+          .update({ end_time: new Date().toISOString(), status: 'completed' })
           .eq('call_id', callId);
-
-        // Store call metrics
         await supabase.from('call_metrics').insert([{
           call_id: callId,
           total_duration: totalDuration,
@@ -204,11 +177,8 @@ class ConversationManager {
           turn_count: metrics.turnCount,
           average_response_time: avgResponseTime
         }]);
-        
         console.log("💾 Stored final metrics in database");
       }
-
-      // Clean up
       this.contexts.delete(callId);
       this.metrics.delete(callId);
     } catch (error) {
@@ -227,24 +197,17 @@ class TranscriptManager {
 
   async saveTranscript(callId, transcript) {
     try {
-      // Only save final transcripts
       if (!transcript.is_final) return null;
-
-      // First verify call exists
       const { data: callExists, error: callCheckError } = await supabase
         .from('calls')
         .select('call_uuid')
         .eq('call_uuid', callId)
         .single();
-
       if (callCheckError || !callExists) {
         console.error(`❌ Call ${callId} not found in database`);
         return null;
       }
-
-      // Format confidence to numeric(4,3) precision
       const formattedConfidence = Number(transcript.confidence).toFixed(3);
-      
       const { data, error } = await supabase
         .from('transcripts')
         .insert([{
@@ -255,12 +218,10 @@ class TranscriptManager {
           is_processed: true,
           timestamp: new Date().toISOString()
         }]);
-
       if (error) {
         console.error('❌ Error inserting transcript:', error);
         return null;
       }
-      
       console.log(`💾 Saved transcript for call ${callId}`);
       return data;
     } catch (error) {
@@ -276,7 +237,6 @@ class TranscriptManager {
         .select('*')
         .eq('call_uuid', callId)
         .order('timestamp', { ascending: true });
-
       if (error) throw error;
       return data;
     } catch (error) {
@@ -332,9 +292,7 @@ const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIV
 app.get('/api/plivo/list-apps', async (req, res) => {
   try {
     const applications = await plivoClient.applications.list();
-    
     console.log('📱 Plivo applications:', applications);
-    
     res.json({
       success: true,
       applications: applications
@@ -353,14 +311,14 @@ app.get('/api/plivo/list-apps', async (req, res) => {
 app.post('/api/plivo/create-ai-assistant', async (req, res) => {
   try {
     const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
-    const appName = "AI Voice Assistant";
+    const appName = "AI_Voice_Assistant"; // No spaces allowed
     const answerUrl = `${baseUrl}/plivo-xml`;
 
     console.log('Creating application with name:', appName, 'and URL:', answerUrl);
 
     // Correct invocation: first argument is the string appName, second is an options object
     const application = await plivoClient.applications.create(
-      appName, 
+      appName,
       {
         answerUrl:    answerUrl,
         answerMethod: "GET"
@@ -565,9 +523,7 @@ async function initializeDeepgramWebSocket() {
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
-      headers: {
-        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
-      }
+      headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` }
     });
 
     const connectionTimeout = setTimeout(() => {
