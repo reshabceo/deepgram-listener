@@ -190,56 +190,61 @@ const sendTTSResponse = async (plivoWs, text) => {
   console.log('🔊 TTS: Sending text:', text);
   try {
     console.log('🎵 Requesting TTS from Deepgram...');
-    const response = await dg.speak.request({ text }, { 
+    const response = await dg.speak.request({ 
+      text 
+    }, { 
       model: 'aura-2-thalia-en', 
       encoding: 'mulaw', 
       sample_rate: 8000, 
-      container: 'none',
+      container: 'none', 
       streaming: true 
     });
-    
-    console.log('🎵 Got TTS response, getting stream...');
+
+    // Wait before sending first chunk
+    await new Promise(resolve => setTimeout(resolve, 200));
+
     const stream = await response.getStream();
     if (!stream) throw new Error('No TTS stream available');
 
-    // Buffer to accumulate audio chunks
     let buffer = Buffer.alloc(0);
-    const CHUNK_SIZE = 320; // 20ms of 8kHz mulaw audio
+    const CHUNK_SIZE = 320;
     let totalChunks = 0;
     let totalBytes = 0;
-    
-    // Process stream with proper timing
-    console.log('🎵 Starting audio stream processing...');
     for await (const chunk of stream) {
       buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
       totalBytes += chunk.length;
-      
-      // Send in 20ms chunks for smooth playback
       while (buffer.length >= CHUNK_SIZE) {
         const audioChunk = buffer.slice(0, CHUNK_SIZE);
         buffer = buffer.slice(CHUNK_SIZE);
-        
-        plivoWs.send(JSON.stringify({ 
-          event: 'media', 
+        plivoWs.send(JSON.stringify({
+          event: 'media',
           media: { payload: audioChunk.toString('base64') }
         }));
         totalChunks++;
-        
-        // Wait 20ms before sending next chunk
         await new Promise(resolve => setTimeout(resolve, 20));
       }
     }
-    
-    // Send any remaining audio
+    // Send remaining audio (if any)
     if (buffer.length > 0) {
-      plivoWs.send(JSON.stringify({ 
-        event: 'media', 
-        media: { payload: buffer.toString('base64') }
+      // Pad with silence if last chunk < 320 bytes
+      const padded = Buffer.concat([buffer, Buffer.alloc(CHUNK_SIZE - buffer.length, 0x7f)]);
+      plivoWs.send(JSON.stringify({
+        event: 'media',
+        media: { payload: padded.toString('base64') }
       }));
       totalChunks++;
     }
-    
+    // Add 200ms (10 chunks) of silence
+    const SILENCE_MULAW = Buffer.alloc(CHUNK_SIZE, 0x7f);
+    for (let i = 0; i < 10; i++) {
+      plivoWs.send(JSON.stringify({
+        event: 'media',
+        media: { payload: SILENCE_MULAW.toString('base64') }
+      }));
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     console.log(`🎵 Audio streaming complete: ${totalChunks} chunks, ${totalBytes} bytes sent`);
+    console.log('🔈 Sent silence padding at end');
     console.log('🔊 TTS stream ended');
   } catch (err) {
     console.error('❌ sendTTSResponse error:', err);
@@ -273,13 +278,23 @@ async function generateAIResponse(callId, userMessage) {
   }
 }
 
-// Plivo XML handler
+// Plivo XML handler (audioTrack="both" is critical!)
 const plivoXmlHandler = (req, res) => {
   const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream
+    bidirectional="true"
+    keepCallAlive="true"
+    streamTimeout="3600"
+    contentType="audio/x-mulaw;rate=8000"
+    audioTrack="both"
+    statusCallbackUrl="${baseUrl}/api/stream-status"
+  >${wsUrl}</Stream>
+</Response>`;
   console.log('📝 Generated Plivo XML:', wsUrl);
   res.set('Content-Type','text/xml');
   res.send(xml);
@@ -414,12 +429,9 @@ app.post('/api/calls/initiate', async (req, res) => {
           answerMethod: 'GET',
           statusCallbackUrl: `${baseUrl}/api/calls/status`,
           statusCallbackMethod: 'POST',
-          // Add ring timeout
           ringTimeout: 60,
-          // Add machine detection
           machineDetection: true,
           machineDetectionTime: 5000,
-          // Add fallback URL in case primary fails
           fallbackMethod: 'GET',
           fallbackUrl: `${baseUrl}/plivo-xml`
         };
