@@ -596,6 +596,15 @@ app.ws('/listen', async (plivoWs, req) => {
     return;
   }
 
+  // Send initial greeting with explicit logging and error handling
+  console.log('🔊 Sending initial greeting TTS...');
+  try {
+    await sendTTSResponse(plivoWs, 'Hello, this is your AI assistant. How may I help you?');
+    console.log('✅ Initial greeting TTS sent');
+  } catch (err) {
+    console.error('❌ Failed to send initial greeting TTS:', err);
+  }
+
   // Initialize Deepgram SDK client for live transcription
   const deepgram = createDeepgramClient(process.env.DEEPGRAM_API_KEY);
   const dgConnection = deepgram.listen.live({
@@ -644,9 +653,6 @@ app.ws('/listen', async (plivoWs, req) => {
   dgConnection.on(LiveTranscriptionEvents.Close, () => {
     console.log('🔌 Deepgram transcription connection closed');
   });
-
-  // Send initial greeting
-  await sendTTSResponse(plivoWs, 'Hello, this is your AI assistant. How may I help you?');
 
   // Handle Plivo messages
   plivoWs.on('message', (msg) => {
