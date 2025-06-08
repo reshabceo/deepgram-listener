@@ -478,6 +478,11 @@ const DEEPGRAM_SETTINGS = {
     think: {
       instructions: 'You are a helpful and friendly AI assistant who loves to chat about anything the user is interested in. Keep responses brief and natural.'
     }
+  },
+  audio: {
+    encoding: 'mulaw',
+    sample_rate: 8000,
+    channels: 1
   }
 };
 
@@ -513,11 +518,14 @@ app.all('/plivo-xml', (req, res) => {
 async function initializeDeepgramWebSocket() {
   return new Promise((resolve, reject) => {
     console.log('🎙️ Initializing Deepgram Voice Agent connection...');
-    const wsUrl = 'wss://agent.deepgram.com/agent';
+    const wsUrl = 'wss://api.deepgram.com/v1/agent';
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
-      headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` }
+      headers: { 
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
     });
 
     const connectionTimeout = setTimeout(() => {
@@ -532,7 +540,10 @@ async function initializeDeepgramWebSocket() {
       console.log('✅ Deepgram Voice Agent WebSocket connected');
       clearTimeout(connectionTimeout);
       // Send initial settings
-      ws.send(JSON.stringify(DEEPGRAM_SETTINGS));
+      ws.send(JSON.stringify({
+        type: 'Settings',
+        settings: DEEPGRAM_SETTINGS
+      }));
       resolve(ws);
     });
 
@@ -641,6 +652,9 @@ app.ws('/listen', async (plivoWs, req) => {
                   is_processed: true,
                   timestamp: new Date().toISOString()
                 }]);
+                break;
+              case 'Error':
+                console.error('❌ Deepgram error:', response.error);
                 break;
               default:
                 console.log('📥 Other response:', response);
