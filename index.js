@@ -795,10 +795,60 @@ app.get('/api/calls/:callId/transcripts', async (req, res) => {
   }
 });
 
-// Minimal /api/calls/initiate handler for smoke test
-app.post('/api/calls/initiate', (req, res) => {
+// Replace the minimal /api/calls/initiate handler with the real Plivo call initiation logic
+app.post('/api/calls/initiate', async (req, res) => {
   console.log('🔥 initiate endpoint hit, body:', req.body);
-  res.json({ success: true, youSent: req.body });
+  try {
+    const { from, to, appId } = req.body;
+    if (!from || !to) {
+      return res.status(400).json({ success: false, error: 'Missing required parameters: from and to numbers' });
+    }
+
+    // Format the phone numbers to ensure E.164 format
+    const formattedFrom = from.startsWith('+') ? from : `+${from}`;
+    const formattedTo = to.startsWith('+') ? to : `+${to}`;
+
+    // Ensure BASE_URL is properly formatted
+    const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
+    const answerUrl = `${baseUrl}/plivo-xml`;
+
+    console.log('📞 Initiating call from', formattedFrom, 'to', formattedTo);
+    console.log('📞 Answer URL:', answerUrl);
+
+    // Create call using Plivo with optional appId
+    const callOptions = {
+      answerMethod: 'GET',
+      statusCallbackUrl: `${baseUrl}/api/calls/status`,
+      statusCallbackMethod: 'POST'
+    };
+
+    // Add applicationId if provided
+    if (appId) {
+      callOptions.applicationId = appId;
+    }
+
+    const response = await plivoClient.calls.create(
+      formattedFrom,
+      formattedTo,
+      answerUrl,
+      callOptions
+    );
+
+    console.log('✅ Call initiated successfully:', response.requestUuid);
+
+    res.json({
+      success: true,
+      requestId: response.requestUuid,
+      message: 'Call initiated successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error initiating call:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to initiate call',
+      details: error.message || 'Unknown error occurred'
+    });
+  }
 });
 
 // Call status webhook
