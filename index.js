@@ -204,7 +204,7 @@ const sendTTSResponse = async (plivoWs, text) => {
 
     // Buffer to accumulate audio chunks
     let buffer = Buffer.alloc(0);
-    const CHUNK_SIZE = 160; // 20ms of 8kHz mulaw audio (8000 samples/sec * 0.02 sec)
+    const CHUNK_SIZE = 320; // 20ms of 8kHz mulaw audio
     let totalChunks = 0;
     let totalBytes = 0;
     
@@ -225,18 +225,13 @@ const sendTTSResponse = async (plivoWs, text) => {
         }));
         totalChunks++;
         
-        // Wait exactly 20ms for proper timing (8kHz = 160 samples per 20ms)
+        // Wait 20ms before sending next chunk
         await new Promise(resolve => setTimeout(resolve, 20));
       }
     }
     
     // Send any remaining audio
     if (buffer.length > 0) {
-      // Pad the last chunk with silence if needed
-      if (buffer.length < CHUNK_SIZE) {
-        const padding = Buffer.alloc(CHUNK_SIZE - buffer.length, 0xFF);
-        buffer = Buffer.concat([buffer, padding]);
-      }
       plivoWs.send(JSON.stringify({ 
         event: 'media', 
         media: { payload: buffer.toString('base64') }
@@ -284,7 +279,7 @@ const plivoXmlHandler = (req, res) => {
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    audioTrack="both"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
   console.log('📝 Generated Plivo XML:', wsUrl);
   res.set('Content-Type','text/xml');
   res.send(xml);
@@ -406,13 +401,48 @@ app.post('/api/calls/initiate', async (req, res) => {
   try {
     const { from, to, appId } = req.body;
     if (!from || !to) return res.status(400).json({ success: false, error: 'Missing from/to' });
+    
     const f = from.startsWith('+') ? from : `+${from}`;
     const t = to.startsWith('+') ? to : `+${to}`;
     const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
     const answerUrl = `${baseUrl}/plivo-xml`;
-    const options = { answerMethod: 'GET', statusCallbackUrl: `${baseUrl}/api/calls/status`, statusCallbackMethod: 'POST' };
-    if (appId) options.applicationId = appId;
-    const response = await plivoClient.calls.create(f, t, answerUrl, options);
+    
+    // Add retry logic with delay
+    const makeCall = async (attempt = 1) => {
+      try {
+        const options = { 
+          answerMethod: 'GET',
+          statusCallbackUrl: `${baseUrl}/api/calls/status`,
+          statusCallbackMethod: 'POST',
+          // Add ring timeout
+          ringTimeout: 60,
+          // Add machine detection
+          machineDetection: true,
+          machineDetectionTime: 5000,
+          // Add fallback URL in case primary fails
+          fallbackMethod: 'GET',
+          fallbackUrl: `${baseUrl}/plivo-xml`
+        };
+        
+        if (appId) options.applicationId = appId;
+        
+        console.log(`📞 Attempting call (try ${attempt})...`);
+        const response = await plivoClient.calls.create(f, t, answerUrl, options);
+        return response;
+      } catch (error) {
+        if (attempt < 2) {
+          console.log(`⏳ Call attempt ${attempt} failed, retrying in 2 seconds...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return makeCall(attempt + 1);
+        }
+        throw error;
+      }
+    };
+    
+    // Wait a bit for the server to be fully ready
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const response = await makeCall();
     res.json({ success: true, requestId: response.requestUuid });
   } catch (error) {
     console.error('❌ initiate error:', error);
