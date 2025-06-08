@@ -291,7 +291,7 @@ const plivoXmlHandler = (req, res) => {
     keepCallAlive="true"
     streamTimeout="3600"
     contentType="audio/x-mulaw;rate=8000"
-    audioTrack="both"
+    audioTrack="outbouund"
     statusCallbackUrl="${baseUrl}/api/stream-status"
   >${wsUrl}</Stream>
 </Response>`;
