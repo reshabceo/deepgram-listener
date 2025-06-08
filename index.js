@@ -472,9 +472,18 @@ async function generateAIResponse(callId, userMessage) {
   }
 }
 
+// Deepgram Voice Agent settings
+const DEEPGRAM_SETTINGS = {
+  agent: {
+    think: {
+      instructions: 'You are a helpful and friendly AI assistant who loves to chat about anything the user is interested in. Keep responses brief and natural.'
+    }
+  }
+};
+
 // ✅ For Railway status check
 app.get('/', (req, res) => {
-  res.send('✅ Deepgram Listener is running');
+  res.send('✅ Deepgram Voice Agent is running');
 });
 
 // Replace your existing '/plivo-xml' handler with this exact block:
@@ -485,7 +494,6 @@ app.all('/plivo-xml', (req, res) => {
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Speak>Hello! I am your AI assistant. How can I help you today?</Speak>
   <Stream
     streamTimeout="3600"
     keepCallAlive="true"
@@ -501,25 +509,11 @@ app.all('/plivo-xml', (req, res) => {
   res.send(xml);
 });
 
-// Constants for API configuration
-const DEEPGRAM_CONFIG = {
-  encoding: 'mulaw',
-  sample_rate: 8000,
-  channels: 1,
-  model: 'general',
-  language: 'en-US',
-  punctuate: true,
-  diarize: true,
-  interim_results: true,
-  utterance_end_ms: 1000,
-  vad_turnoff: 500
-};
-
-// Initialize Deepgram WebSocket with connection handling
+// Initialize Deepgram Voice Agent WebSocket
 async function initializeDeepgramWebSocket() {
   return new Promise((resolve, reject) => {
-    console.log('🎙️ Initializing Deepgram connection...');
-    const wsUrl = `wss://api.deepgram.com/v1/listen?${new URLSearchParams(DEEPGRAM_CONFIG).toString()}`;
+    console.log('🎙️ Initializing Deepgram Voice Agent connection...');
+    const wsUrl = 'wss://agent.deepgram.com/agent';
     console.log('🔗 Connecting to:', wsUrl);
 
     const ws = new WebSocket(wsUrl, {
@@ -535,8 +529,10 @@ async function initializeDeepgramWebSocket() {
     }, 5000);
 
     ws.on('open', () => {
-      console.log('✅ Deepgram WebSocket connected');
+      console.log('✅ Deepgram Voice Agent WebSocket connected');
       clearTimeout(connectionTimeout);
+      // Send initial settings
+      ws.send(JSON.stringify(DEEPGRAM_SETTINGS));
       resolve(ws);
     });
 
@@ -551,26 +547,6 @@ async function initializeDeepgramWebSocket() {
   });
 }
 
-// Buffer for audio data while connecting
-class AudioBuffer {
-  constructor() {
-    this.buffer = [];
-    this.isConnecting = false;
-  }
-
-  add(data) {
-    this.buffer.push(data);
-  }
-
-  clear() {
-    this.buffer = [];
-  }
-
-  get data() {
-    return this.buffer;
-  }
-}
-
 // Update the WebSocket listener section
 app.ws('/listen', async (plivoWs, req) => {
   const callId = req.query.call_uuid;
@@ -583,9 +559,9 @@ app.ws('/listen', async (plivoWs, req) => {
   console.log('📞 WebSocket /listen connected');
   let keepAliveInterval;
   let deepgramWs = null;
-  const audioBuffer = new AudioBuffer();
+  let streamId = '';
   
-  // Initialize conversation context
+  // Initialize conversation in database
   try {
     const { data: existingCall, error: checkError } = await supabase
       .from('calls')
@@ -611,8 +587,6 @@ app.ws('/listen', async (plivoWs, req) => {
         return;
       }
     }
-
-    await conversationManager.initializeContext(callId);
   } catch (err) {
     console.error('❌ Failed to setup call:', err);
     plivoWs.close();
@@ -621,131 +595,55 @@ app.ws('/listen', async (plivoWs, req) => {
 
   // Function to connect to Deepgram
   const connectToDeepgram = async () => {
-    if (audioBuffer.isConnecting) return;
-    audioBuffer.isConnecting = true;
-
     try {
       deepgramWs = await initializeDeepgramWebSocket();
       
-      // Send buffered audio
-      if (audioBuffer.data.length > 0) {
-        console.log('📤 Sending buffered audio data...');
-        for (const data of audioBuffer.data) {
-          if (deepgramWs.readyState === WebSocket.OPEN) {
-            deepgramWs.send(data);
-          }
-        }
-        audioBuffer.clear();
-      }
-      
       // Set up Deepgram message handler
-      deepgramWs.on('message', async (msg) => {
+      deepgramWs.on('message', async (message, isBinary) => {
         try {
-          const parsed = JSON.parse(msg.toString());
-          // Only react to final transcriptions
-          if (parsed.type === 'Results' && parsed.is_final) {
-            const transcript = parsed.channel?.alternatives?.[0];
-            if (!transcript) return;
-
-            const transcriptText = transcript.transcript;
-            if (!transcriptText || transcriptText.trim() === '') return;
-            
-            console.log("🗣️ Transcribed:", transcriptText);
-            
-            // Save transcript only if final
-            await transcriptManager.saveTranscript(callId, {
-              text: transcriptText,
-              confidence: transcript.confidence,
-              speaker: parsed.speaker || 'user',
-              is_final: true
-            });
-
-            const context = conversationManager.getContext(callId);
-            if (!context) {
-              console.error('❌ No context found for call:', callId);
-              return;
-            }
-
-            context.transcriptBuffer += ' ' + transcriptText;
-
-            // Process once per utterance
-            if (textUtils.isEndOfThought(transcriptText, 1000)) {
-              const fullUtterance = textUtils.cleanTranscript(context.transcriptBuffer);
-              context.transcriptBuffer = '';
-
-              if (textUtils.hasMinimumQuality(fullUtterance)) {
-                console.log("🤖 Processing utterance:", fullUtterance);
-                
-                try {
-                  // Generate AI response
-                  const aiResponse = await generateAIResponse(callId, fullUtterance);
-                  if (aiResponse) {
-                    console.log("🤖 AI Response:", aiResponse);
-                    
-                    // Save agent's response transcript
-                    await transcriptManager.saveTranscript(callId, {
-                      text: aiResponse,
-                      speaker: 'agent',
-                      confidence: 1.0,
-                      is_final: true
-                    });
-
-                    // Send TTS response with retries
-                    let retryCount = 0;
-                    const maxRetries = 3;
-                    
-                    while (retryCount < maxRetries) {
-                      try {
-                        await sendTTSResponse(plivoWs, aiResponse);
-                        console.log("✅ TTS response sent successfully");
-                        break;
-                      } catch (ttsError) {
-                        console.error(`❌ TTS error (attempt ${retryCount + 1}/${maxRetries}):`, ttsError);
-                        retryCount++;
-                        if (retryCount === maxRetries) {
-                          console.error("❌ Max TTS retries reached, using fallback");
-                          const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-                          await sendTTSResponse(plivoWs, fallbackResponse);
-                        } else {
-                          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1s before retry
-                        }
-                      }
-                    }
-                  }
-                } catch (error) {
-                  console.error("❌ AI/TTS error:", error);
-                  const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-                  console.log("⚠️ Using fallback response:", fallbackResponse);
-                  
-                  await transcriptManager.saveTranscript(callId, {
-                    text: fallbackResponse,
-                    speaker: 'agent',
-                    confidence: 1.0,
-                    is_final: true
-                  });
-                  
-                  try {
-                    await sendTTSResponse(plivoWs, fallbackResponse);
-                  } catch (ttsError) {
-                    console.error("❌ Failed to send fallback response:", ttsError);
-                  }
-                }
-              } else {
-                // Utterance too short — reply with a simple fallback to keep the call alive.
-                const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
-                console.log("⚠️ Utterance below quality threshold, using fallback:", fallbackResponse);
-                await transcriptManager.saveTranscript(callId, {
-                  text: fallbackResponse,
-                  speaker: 'agent',
-                  confidence: 1.0,
-                  is_final: true
-                });
-                try {
-                  await sendTTSResponse(plivoWs, fallbackResponse);
-                } catch (ttsError) {
-                  console.error("❌ Failed to send fallback response:", ttsError);
-                }
+          if (isBinary) {
+            // This is audio data from Deepgram
+            const audioDelta = {
+              event: 'playAudio',
+              media: {
+                contentType: 'audio/x-mulaw',
+                sampleRate: 8000,
+                payload: Buffer.from(message).toString('base64')
               }
+            };
+            plivoWs.send(JSON.stringify(audioDelta));
+          } else {
+            const response = JSON.parse(message.toString());
+            console.log('📥 Deepgram response:', response.type);
+            
+            switch (response.type) {
+              case 'SettingsApplied':
+                console.log('✅ Settings successfully applied');
+                break;
+              case 'Welcome':
+                console.log('👋 Received welcome message');
+                break;
+              case 'UserStartedSpeaking':
+                console.log('🗣️ User started speaking');
+                // Clear any existing audio
+                plivoWs.send(JSON.stringify({
+                  event: 'clearAudio',
+                  stream_id: streamId
+                }));
+                break;
+              case 'Transcription':
+                // Save transcript to database
+                await supabase.from('transcripts').insert([{
+                  call_uuid: callId,
+                  transcript: response.text,
+                  speaker: 'user',
+                  confidence: response.confidence || 1.0,
+                  is_processed: true,
+                  timestamp: new Date().toISOString()
+                }]);
+                break;
+              default:
+                console.log('📥 Other response:', response);
             }
           }
         } catch (error) {
@@ -754,8 +652,6 @@ app.ws('/listen', async (plivoWs, req) => {
       });
     } catch (error) {
       console.error('❌ Failed to connect to Deepgram:', error);
-    } finally {
-      audioBuffer.isConnecting = false;
     }
   };
 
@@ -765,26 +661,21 @@ app.ws('/listen', async (plivoWs, req) => {
   // Handle Plivo messages
   plivoWs.on('message', async (msg) => {
     try {
-      const parsed = JSON.parse(msg.toString());
+      const data = JSON.parse(msg.toString());
       
-      if (parsed.event === 'media' && parsed.media?.payload) {
-        const audioData = Buffer.from(parsed.media.payload, 'base64');
-        
-        if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
-          console.log('⏳ Buffering audio while connecting...');
-          audioBuffer.add(audioData);
-          if (!audioBuffer.isConnecting) {
-            connectToDeepgram();
+      switch (data.event) {
+        case 'media':
+          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            deepgramWs.send(Buffer.from(data.media.payload, 'base64'));
           }
-        } else {
-          try {
-            deepgramWs.send(audioData);
-          } catch (error) {
-            console.error("❌ Error sending audio to Deepgram:", error);
-            audioBuffer.add(audioData);
-            connectToDeepgram();
-          }
-        }
+          break;
+        case 'start':
+          console.log('🎬 Stream started');
+          streamId = data.start.streamId;
+          console.log('📝 Stream ID:', streamId);
+          break;
+        default:
+          console.log('📥 Other Plivo event:', data.event);
       }
     } catch (error) {
       console.error('❌ Failed to process Plivo message:', error);
@@ -803,8 +694,14 @@ app.ws('/listen', async (plivoWs, req) => {
         console.log('Closing Deepgram WebSocket');
         deepgramWs.close();
       }
-      console.log('Ending conversation');
-      await conversationManager.endConversation(callId);
+      await supabase
+        .from('calls')
+        .update({ 
+          status: 'completed',
+          end_time: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('call_uuid', callId);
     } catch (error) {
       console.error('❌ Error during cleanup:', error);
     }
@@ -830,36 +727,25 @@ app.ws('/listen', async (plivoWs, req) => {
 
 // Start server
 app.listen(port, () => {
-  console.log(`✅ Deepgram WebSocket listener running on port ${port}...`);
+  console.log(`✅ Deepgram Voice Agent running on port ${port}...`);
 });
 
 // Add API endpoints for transcript retrieval
 app.get('/api/calls/:callId/transcripts', async (req, res) => {
   try {
     const { callId } = req.params;
-    const transcripts = await transcriptManager.getTranscripts(callId);
-    res.json(transcripts);
+    const { data, error } = await supabase
+      .from('transcripts')
+      .select('*')
+      .eq('call_uuid', callId)
+      .order('timestamp', { ascending: true });
+    
+    if (error) throw error;
+    res.json(data);
   } catch (error) {
     console.error('Error fetching transcripts:', error);
     res.status(500).json({ error: 'Failed to fetch transcripts' });
   }
-});
-
-// Get live transcript updates (WebSocket endpoint)
-app.ws('/api/calls/:callId/live-transcript', async (ws, req) => {
-  const { callId } = req.params;
-  
-  // Send initial transcripts
-  try {
-    const transcripts = await transcriptManager.getTranscripts(callId);
-    ws.send(JSON.stringify({ type: 'initial', transcripts }));
-  } catch (error) {
-    console.error('Error sending initial transcripts:', error);
-  }
-
-  ws.on('close', () => {
-    // Clean up if needed
-  });
 });
 
 // Update the call initiation endpoint
@@ -936,80 +822,24 @@ app.post('/api/calls/status', async (req, res) => {
       AnswerTime
     } = req.body;
 
-    // Check if call record exists
-    const { data: existingCall } = await supabase
+    // Update call record
+    await supabase
       .from('calls')
-      .select('call_uuid')
-      .eq('call_uuid', CallUUID)
-      .single();
-
-    if (!existingCall && CallStatus === 'ringing') {
-      // Create new call record on first status update
-      await supabase
-        .from('calls')
-        .insert([{
-          call_uuid: CallUUID,
-          from_number: From,
-          to_number: To,
-          status: CallStatus,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        }]);
-    } else {
-      // Update existing call record
-      await supabase
-        .from('calls')
-        .update({
-          status: CallStatus,
-          duration: Duration,
-          cost: TotalCost,
-          end_time: EndTime,
-          start_time: StartTime,
-          answer_time: AnswerTime,
-          updated_at: new Date().toISOString()
-        })
-        .eq('call_uuid', CallUUID);
-    }
+      .update({
+        status: CallStatus,
+        duration: Duration,
+        cost: TotalCost,
+        end_time: EndTime,
+        start_time: StartTime,
+        answer_time: AnswerTime,
+        updated_at: new Date().toISOString()
+      })
+      .eq('call_uuid', CallUUID);
 
     res.status(200).send('Status updated');
   } catch (error) {
     console.error('❌ Error updating call status:', error);
     res.status(500).json({ error: 'Failed to update call status' });
-  }
-});
-
-// Recording webhook
-app.post('/api/recording', async (req, res) => {
-  try {
-    const {
-      CallUUID,
-      RecordingURL,
-      RecordingID,
-      RecordingDuration,
-      RecordingStartTime,
-      RecordingEndTime
-    } = req.body;
-
-    console.log(`📝 Recording received for call ${CallUUID}`);
-
-    // Store recording details in Supabase
-    const { error } = await supabase
-      .from('call_recordings')
-      .insert([{
-        call_uuid: CallUUID,
-        recording_url: RecordingURL,
-        recording_id: RecordingID,
-        duration: RecordingDuration,
-        start_time: RecordingStartTime,
-        end_time: RecordingEndTime
-      }]);
-
-    if (error) throw error;
-
-    res.json({ message: 'Recording processed successfully' });
-  } catch (error) {
-    console.error('❌ Error processing recording:', error);
-    res.status(500).json({ error: 'Failed to process recording' });
   }
 });
 
