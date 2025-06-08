@@ -397,4 +397,30 @@ app.post('/api/stream-status', async (req, res) => {
 });
 
 // Test Plivo credentials
-app.get('/api
+app.get('/api/plivo/test', async (req, res) => {
+  try {
+    const account = await plivoClient.accounts.get(process.env.PLIVO_AUTH_ID);
+    const numbers = await plivoClient.numbers.list();
+    res.json({ success: true, account: { type: account.accountType, status: account.status }, numbers });
+  } catch (error) {
+    console.error('❌ plivo test error:', error);
+    res.status(500).json({ success: false, error: 'Test failed', details: error.message });
+  }
+});
+
+// Health check
+app.get('/api/test', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Error and 404 handlers
+app.use((err, req, res, next) => {
+  console.error('❌ Server error:', err);
+  res.status(500).json({ success: false, error: 'Internal server error', details: err.message });
+});
+app.use((req, res) => {
+  res.status(404).json({ success: false, error: 'Route not found', path: req.path });
+});
+
+// Start server
+server.listen(port, () => console.log(`✅ AI Voice Agent running on port ${port}`));
