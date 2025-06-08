@@ -547,6 +547,18 @@ const deepgram = new Deepgram(process.env.DEEPGRAM_API_KEY);
 // Add initial greeting message
 const INITIAL_GREETING = "Hello, this is Boostmysites AI officer. How can I assist you today?";
 
+// Add Deepgram WebSocket initialization for real-time transcription
+async function initializeDeepgramWebSocket() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket('wss://api.deepgram.com/v1/listen', {
+      headers: {
+        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
+      }
+    });
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
+  });
+}
 
 // Update the WebSocket listener section
 app.ws('/listen', async (plivoWs, req) => {
@@ -562,46 +574,6 @@ app.ws('/listen', async (plivoWs, req) => {
   let deepgramWs = null;
   let streamId = '';
   
-  // Send initial greeting
-  try {
-    console.log('🎙️ Sending initial greeting...');
-    const ttsConnection = deepgram.speak.live({
-      model: "aura-2-thalia-en",
-      encoding: "mulaw",
-      sample_rate: 8000
-    });
-
-    ttsConnection.on('open', () => {
-      console.log('🎯 Initial greeting TTS connection opened');
-      ttsConnection.sendText(INITIAL_GREETING);
-      ttsConnection.flush();
-    });
-
-    ttsConnection.on('audio', (data) => {
-      console.log('🔊 Received initial greeting audio chunk');
-      const audioDelta = {
-        event: 'playAudio',
-        media: {
-          contentType: 'audio/x-mulaw',
-          sampleRate: 8000,
-          payload: Buffer.from(data).toString('base64')
-        }
-      };
-      plivoWs.send(JSON.stringify(audioDelta));
-    });
-
-    ttsConnection.on('close', () => {
-      console.log('🔌 Initial greeting TTS connection closed');
-    });
-
-    ttsConnection.on('error', (error) => {
-      console.error('❌ Initial greeting TTS error:', error);
-    });
-
-  } catch (error) {
-    console.error('❌ Error sending initial greeting:', error);
-  }
-
   // Initialize conversation in database
   try {
     const { data: existingCall, error: checkError } = await supabase
