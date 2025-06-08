@@ -10,6 +10,7 @@ const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 const plivo = require('plivo');
 const { Deepgram } = require('@deepgram/sdk');
+const { createClient: createDeepgramClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -351,43 +352,41 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
   }
 });
 
-// Refactored TTS using Deepgram TTS WebSocket API with mulaw/8kHz output for Plivo
+// Refactored TTS using Deepgram REST API with streaming
 const sendTTSResponse = async (plivoWs, text) => {
-  const TTS_MODEL = 'aura-2-thalia-en';
-  const TTS_ENCODING = 'mulaw';
-  const TTS_SAMPLE_RATE = 8000;
-  return new Promise((resolve, reject) => {
-    const ttsWs = new WebSocket(
-      `wss://api.deepgram.com/v1/speak?model=${TTS_MODEL}&encoding=${TTS_ENCODING}&sample_rate=${TTS_SAMPLE_RATE}&container=none`,
+  const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
+  const deepgram = createDeepgramClient(deepgramApiKey);
+  try {
+    const response = await deepgram.speak.request(
+      { text },
       {
-        headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}` }
+        model: 'aura-2-thalia-en',
+        encoding: 'mulaw',
+        sample_rate: 8000,
+        container: 'none'
       }
     );
-    ttsWs.on('open', () => {
-      console.log('🔊 [TTS] Deepgram TTS WebSocket opened (mulaw/8kHz, container=none)');
-      ttsWs.send(JSON.stringify({ type: 'Speak', text }));
-      ttsWs.send(JSON.stringify({ type: 'Flush' }));
-    });
-    ttsWs.on('message', (data, isBinary) => {
-      if (isBinary) {
+    const stream = await response.getStream();
+    if (stream) {
+      stream.on('data', (chunk) => {
         plivoWs.send(JSON.stringify({
           event: 'media',
-          media: { payload: Buffer.from(data).toString('base64') }
+          media: { payload: Buffer.from(chunk).toString('base64') }
         }));
-        console.log('🔊 [TTS] Sent mulaw/8kHz audio chunk to Plivo, length:', data.length);
-      } else {
-        console.log('📥 [TTS] Non-binary message:', data.toString());
-      }
-    });
-    ttsWs.on('close', () => {
-      console.log('🔊 [TTS] Deepgram TTS WebSocket closed');
-      resolve();
-    });
-    ttsWs.on('error', (err) => {
-      console.error('❌ [TTS] Deepgram TTS WebSocket error:', err);
-      reject(err);
-    });
-  });
+        console.log('🔊 [TTS-REST] Sent mulaw/8kHz audio chunk to Plivo, length:', chunk.length);
+      });
+      stream.on('end', () => {
+        console.log('🔊 [TTS-REST] Deepgram TTS audio stream ended');
+      });
+      stream.on('error', (err) => {
+        console.error('❌ [TTS-REST] Deepgram TTS stream error:', err);
+      });
+    } else {
+      console.error('❌ [TTS-REST] Error generating audio: stream is null');
+    }
+  } catch (err) {
+    console.error('❌ [TTS-REST] Error in sendTTSResponse:', err);
+  }
 };
 
 // Enhanced ChatGPT integration
@@ -563,9 +562,8 @@ app.ws('/listen', async (plivoWs, req) => {
 
   console.log('📞 WebSocket /listen connected for call:', callId);
   let keepAliveInterval;
-  let deepgramWs = null;
   let streamId = '';
-  
+
   // Initialize conversation in database
   try {
     const { data: existingCall, error: checkError } = await supabase
@@ -598,107 +596,69 @@ app.ws('/listen', async (plivoWs, req) => {
     return;
   }
 
-  // Function to connect to Deepgram
-  const connectToDeepgram = async () => {
-    try {
-      console.log('🔌 Connecting to Deepgram WebSocket...');
-      deepgramWs = await initializeDeepgramWebSocket();
-      console.log('✅ Deepgram WebSocket connected');
-      
-      // Log all Deepgram WebSocket events
-      deepgramWs.on('message', async (message, isBinary) => {
-        try {
-          // Log raw message
-          if (isBinary) {
-            console.log('🔊 [DG] Binary message (audio, length):', message.length);
-          } else {
-            console.log('📥 [DG] Raw message:', message.toString());
-          }
-          // Try to parse and log as JSON
-          let response;
-          try {
-            response = JSON.parse(message.toString());
-            console.log('📥 [DG] Parsed message:', response);
-          } catch (e) {
-            // Not JSON, ignore
-          }
-          if (!isBinary && response) {
-            switch (response.type) {
-              case 'SettingsApplied':
-                console.log('✅ Settings successfully applied');
-                break;
-              case 'Welcome':
-                console.log('👋 Received welcome message with request_id:', response.request_id);
-                break;
-              case 'UserStartedSpeaking':
-                console.log('🗣️ User started speaking');
-                plivoWs.send(JSON.stringify({
-                  event: 'clearAudio',
-                  stream_id: streamId
-                }));
-                break;
-              case 'ConversationText':
-                console.log('📝 Received transcription from Deepgram:', response.text);
-                try {
-                  await supabase.from('transcripts').insert([{
-                    call_uuid: callId,
-                    transcript: response.text,
-                    speaker: response.speaker || 'user',
-                    confidence: response.confidence || 1.0,
-                    is_processed: true,
-                    timestamp: new Date().toISOString()
-                  }]);
-                } catch (dbErr) {
-                  console.error('❌ Error saving transcript to DB:', dbErr);
-                }
-                break;
-              case 'Error':
-                console.error('❌ Deepgram error:', response.description, 'Code:', response.code);
-                break;
-              case 'Warning':
-                console.warn('⚠️ Deepgram warning:', response.description);
-                break;
-              default:
-                console.log('📥 [DG] Other response:', response);
-            }
-          }
-        } catch (error) {
-          console.error('❌ Error processing Deepgram message:', error);
-        }
-      });
-      deepgramWs.on('error', (err) => {
-        console.error('❌ Deepgram WebSocket error:', err);
-      });
-      deepgramWs.on('close', (code, reason) => {
-        console.error('❌ Deepgram WebSocket closed:', code, reason);
-        // Optionally, implement reconnection logic here
-      });
-    } catch (error) {
-      console.error('❌ Failed to connect to Deepgram:', error);
-    }
-  };
+  // Initialize Deepgram SDK client for live transcription
+  const deepgram = createDeepgramClient(process.env.DEEPGRAM_API_KEY);
+  const dgConnection = deepgram.listen.live({
+    model: 'nova-3',
+    language: 'en-US',
+    smart_format: true,
+    encoding: 'mulaw',
+    sample_rate: 8000
+  });
 
-  // Initial connection attempt
-  await connectToDeepgram();
+  dgConnection.on(LiveTranscriptionEvents.Open, () => {
+    console.log('✅ Deepgram transcription connection opened');
+  });
+
+  dgConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+    const transcript = data.channel.alternatives[0].transcript;
+    const isFinal = data.is_final;
+    if (transcript && isFinal) {
+      console.log('📝 Final transcript:', transcript);
+      // Save transcript to DB
+      try {
+        await supabase.from('transcripts').insert([{
+          call_uuid: callId,
+          transcript,
+          speaker: 'user',
+          confidence: data.channel.alternatives[0].confidence || 1.0,
+          is_processed: true,
+          timestamp: new Date().toISOString()
+        }]);
+      } catch (dbErr) {
+        console.error('❌ Error saving transcript to DB:', dbErr);
+      }
+      // Generate AI response and send TTS
+      const aiText = await generateAIResponse(callId, transcript);
+      console.log('🤖 AI:', aiText);
+      await sendTTSResponse(plivoWs, aiText);
+    } else if (transcript) {
+      console.log('📝 Interim transcript:', transcript);
+    }
+  });
+
+  dgConnection.on(LiveTranscriptionEvents.Error, (err) => {
+    console.error('❌ Deepgram transcription error:', err);
+  });
+
+  dgConnection.on(LiveTranscriptionEvents.Close, () => {
+    console.log('🔌 Deepgram transcription connection closed');
+  });
+
+  // Send initial greeting
+  await sendTTSResponse(plivoWs, 'Hello, this is your AI assistant. How may I help you?');
 
   // Handle Plivo messages
-  plivoWs.on('message', async (msg) => {
+  plivoWs.on('message', (msg) => {
     try {
       const data = JSON.parse(msg.toString());
       if (data.event === 'media' && data.media?.payload) {
-        // Log the first 40 chars of the payload for debugging
-        console.log('🎤 [Plivo] Audio payload (first 40 chars):', data.media.payload.slice(0, 40), 'length:', data.media.payload.length);
+        // Forward audio to Deepgram
+        dgConnection.send(Buffer.from(data.media.payload, 'base64'));
       }
       console.log('📥 Received message from Plivo:', data.event, JSON.stringify(data));
-      
       switch (data.event) {
         case 'media':
-          if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            console.log('🎤 Forwarding audio from Plivo to Deepgram (media event, payload length):', data.media?.payload?.length);
-            deepgramWs.send(Buffer.from(data.media.payload, 'base64'));
-          } else {
-            console.warn('⚠️ Deepgram WebSocket not open when trying to send audio');
-          }
           break;
         case 'start':
           console.log('🎬 Stream started');
@@ -715,7 +675,6 @@ app.ws('/listen', async (plivoWs, req) => {
 
   plivoWs.on('error', (error) => {
     console.error('❌ Plivo WebSocket error:', error);
-    // Optionally, implement reconnection logic here
   });
 
   plivoWs.on('close', () => {
@@ -731,10 +690,7 @@ app.ws('/listen', async (plivoWs, req) => {
         console.log('Clearing keepAlive interval');
         clearInterval(keepAliveInterval);
       }
-      if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-        console.log('Closing Deepgram WebSocket');
-        deepgramWs.close();
-      }
+      dgConnection.finish();
       await supabase
         .from('calls')
         .update({ 
