@@ -886,7 +886,7 @@ app.use((req, res) => {
 });
 
 // Confirm Plivo XML is generating the correct WebSocket URL
-app.all('/plivo-xml', (req, res) => {
+const plivoXmlHandler = (req, res) => {
   const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
@@ -895,6 +895,8 @@ app.all('/plivo-xml', (req, res) => {
   console.log('📝 Generated XML for Plivo, WebSocket URL:', wsUrl);
   res.set('Content-Type', 'text/xml');
   res.send(xml);
-});
+};
+app.get('/plivo-xml', plivoXmlHandler);
+app.post('/plivo-xml', plivoXmlHandler);
 
 // Reminder: If Plivo is not connecting via WebSocket, double-check your Plivo application config and the generated XML above.
