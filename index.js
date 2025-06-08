@@ -189,13 +189,57 @@ const sendTTSResponse = async (plivoWs, text) => {
   const dg = createClient(process.env.DEEPGRAM_API_KEY);
   console.log('🔊 TTS: Sending text:', text);
   try {
-    const response = await dg.speak.request({ text }, { model: 'aura-2-thalia-en', encoding: 'mulaw', sample_rate: 8000, container: 'none' });
+    console.log('🎵 Requesting TTS from Deepgram...');
+    const response = await dg.speak.request({ text }, { 
+      model: 'aura-2-thalia-en', 
+      encoding: 'mulaw', 
+      sample_rate: 8000, 
+      container: 'none',
+      streaming: true 
+    });
+    
+    console.log('🎵 Got TTS response, getting stream...');
     const stream = await response.getStream();
     if (!stream) throw new Error('No TTS stream available');
-    // THE FIX: for await...of instead of .on('data')
+
+    // Buffer to accumulate audio chunks
+    let buffer = Buffer.alloc(0);
+    const CHUNK_SIZE = 320; // 20ms of 8kHz mulaw audio
+    let totalChunks = 0;
+    let totalBytes = 0;
+    
+    // Process stream with proper timing
+    console.log('🎵 Starting audio stream processing...');
     for await (const chunk of stream) {
-      plivoWs.send(JSON.stringify({ event: 'media', media: { payload: Buffer.from(chunk).toString('base64') } }));
+      buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
+      totalBytes += chunk.length;
+      
+      // Send in 20ms chunks for smooth playback
+      while (buffer.length >= CHUNK_SIZE) {
+        const audioChunk = buffer.slice(0, CHUNK_SIZE);
+        buffer = buffer.slice(CHUNK_SIZE);
+        
+        plivoWs.send(JSON.stringify({ 
+          event: 'media', 
+          media: { payload: audioChunk.toString('base64') }
+        }));
+        totalChunks++;
+        
+        // Wait 20ms before sending next chunk
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
     }
+    
+    // Send any remaining audio
+    if (buffer.length > 0) {
+      plivoWs.send(JSON.stringify({ 
+        event: 'media', 
+        media: { payload: buffer.toString('base64') }
+      }));
+      totalChunks++;
+    }
+    
+    console.log(`🎵 Audio streaming complete: ${totalChunks} chunks, ${totalBytes} bytes sent`);
     console.log('🔊 TTS stream ended');
   } catch (err) {
     console.error('❌ sendTTSResponse error:', err);
