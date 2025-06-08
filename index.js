@@ -7,6 +7,7 @@ const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch');
 const plivo = require('plivo');
+const { createClient: createDeepgramClient } = require('@deepgram/sdk');
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -474,15 +475,33 @@ async function generateAIResponse(callId, userMessage) {
 
 // Deepgram Voice Agent settings
 const DEEPGRAM_SETTINGS = {
-  agent: {
-    think: {
-      instructions: 'You are a helpful and friendly AI assistant who loves to chat about anything the user is interested in. Keep responses brief and natural.'
+  audio: {
+    input: { 
+      encoding: "mulaw", 
+      sample_rate: 8000 
+    },
+    output: { 
+      encoding: "mulaw", 
+      sample_rate: 8000 
     }
   },
-  audio: {
-    encoding: 'mulaw',
-    sample_rate: 8000,
-    channels: 1
+  agent: {
+    listen: { 
+      provider: { 
+        model: "nova-3" 
+      } 
+    },
+    think: {
+      provider: { 
+        model: "gpt-4o-mini" 
+      },
+      prompt: "You are a helpful and friendly AI assistant who loves to chat about anything the user is interested in. Keep responses brief and natural."
+    },
+    speak: { 
+      provider: { 
+        model: "aura-2-andromeda-en" 
+      } 
+    }
   }
 };
 
@@ -514,49 +533,116 @@ app.all('/plivo-xml', (req, res) => {
   res.send(xml);
 });
 
-// Initialize Deepgram Voice Agent WebSocket
-async function initializeDeepgramWebSocket() {
-  return new Promise((resolve, reject) => {
-    console.log('🎙️ Initializing Deepgram Voice Agent connection...');
-    const wsUrl = 'wss://api.deepgram.com/v1/agent';
-    console.log('🔗 Connecting to:', wsUrl);
+// Initialize Deepgram client
+const deepgram = createDeepgramClient(process.env.DEEPGRAM_API_KEY);
 
-    const ws = new WebSocket(wsUrl, {
-      headers: { 
-        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`,
-        'Content-Type': 'application/json'
+// Add initial greeting message
+const INITIAL_GREETING = "Hello, this is Boostmysites AI officer. How can I assist you today?";
+
+// Update the WebSocket message handler
+deepgramWs.on('message', async (message, isBinary) => {
+  try {
+    if (isBinary) {
+      // This is audio data from Deepgram
+      const audioDelta = {
+        event: 'playAudio',
+        media: {
+          contentType: 'audio/x-mulaw',
+          sampleRate: 8000,
+          payload: Buffer.from(message).toString('base64')
+        }
+      };
+      plivoWs.send(JSON.stringify(audioDelta));
+    } else {
+      const response = JSON.parse(message.toString());
+      console.log('📥 Deepgram response:', response.type);
+      
+      switch (response.type) {
+        case 'SettingsApplied':
+          console.log('✅ Settings successfully applied');
+          break;
+        case 'Welcome':
+          console.log('👋 Received welcome message with request_id:', response.request_id);
+          break;
+        case 'UserStartedSpeaking':
+          console.log('🗣️ User started speaking');
+          // Clear any existing audio
+          plivoWs.send(JSON.stringify({
+            event: 'clearAudio',
+            stream_id: streamId
+          }));
+          break;
+        case 'ConversationText':
+          // Save transcript to database
+          await supabase.from('transcripts').insert([{
+            call_uuid: callId,
+            transcript: response.text,
+            speaker: response.speaker || 'user',
+            confidence: response.confidence || 1.0,
+            is_processed: true,
+            timestamp: new Date().toISOString()
+          }]);
+
+          // If this is an AI response, convert it to speech
+          if (response.speaker === 'agent') {
+            try {
+              console.log('🎙️ Converting AI response to speech:', response.text);
+              
+              // Create a new TTS connection
+              const ttsConnection = deepgram.speak.live({
+                model: "aura-2-thalia-en",
+                encoding: "mulaw",
+                sample_rate: 8000
+              });
+
+              // Set up TTS event handlers
+              ttsConnection.on('open', () => {
+                console.log('🎯 TTS connection opened');
+                ttsConnection.sendText(response.text);
+                ttsConnection.flush();
+              });
+
+              ttsConnection.on('audio', (data) => {
+                console.log('🔊 Received TTS audio chunk');
+                // Send audio to Plivo
+                const audioDelta = {
+                  event: 'playAudio',
+                  media: {
+                    contentType: 'audio/x-mulaw',
+                    sampleRate: 8000,
+                    payload: Buffer.from(data).toString('base64')
+                  }
+                };
+                plivoWs.send(JSON.stringify(audioDelta));
+              });
+
+              ttsConnection.on('close', () => {
+                console.log('🔌 TTS connection closed');
+              });
+
+              ttsConnection.on('error', (error) => {
+                console.error('❌ TTS error:', error);
+              });
+
+            } catch (error) {
+              console.error('❌ Error in TTS conversion:', error);
+            }
+          }
+          break;
+        case 'Error':
+          console.error('❌ Deepgram error:', response.description, 'Code:', response.code);
+          break;
+        case 'Warning':
+          console.warn('⚠️ Deepgram warning:', response.description);
+          break;
+        default:
+          console.log('📥 Other response:', response);
       }
-    });
-
-    const connectionTimeout = setTimeout(() => {
-      if (ws.readyState !== WebSocket.OPEN) {
-        console.error('❌ Deepgram connection timeout');
-        ws.close();
-        reject(new Error('Connection timeout'));
-      }
-    }, 5000);
-
-    ws.on('open', () => {
-      console.log('✅ Deepgram Voice Agent WebSocket connected');
-      clearTimeout(connectionTimeout);
-      // Send initial settings
-      ws.send(JSON.stringify({
-        type: 'Settings',
-        settings: DEEPGRAM_SETTINGS
-      }));
-      resolve(ws);
-    });
-
-    ws.on('error', (error) => {
-      console.error('❌ Deepgram WebSocket error:', error);
-      reject(error);
-    });
-
-    ws.on('close', () => {
-      console.log('🔌 Deepgram WebSocket closed');
-    });
-  });
-}
+    }
+  } catch (error) {
+    console.error('❌ Error processing Deepgram message:', error);
+  }
+});
 
 // Update the WebSocket listener section
 app.ws('/listen', async (plivoWs, req) => {
@@ -572,6 +658,46 @@ app.ws('/listen', async (plivoWs, req) => {
   let deepgramWs = null;
   let streamId = '';
   
+  // Send initial greeting
+  try {
+    console.log('🎙️ Sending initial greeting...');
+    const ttsConnection = deepgram.speak.live({
+      model: "aura-2-thalia-en",
+      encoding: "mulaw",
+      sample_rate: 8000
+    });
+
+    ttsConnection.on('open', () => {
+      console.log('🎯 Initial greeting TTS connection opened');
+      ttsConnection.sendText(INITIAL_GREETING);
+      ttsConnection.flush();
+    });
+
+    ttsConnection.on('audio', (data) => {
+      console.log('🔊 Received initial greeting audio chunk');
+      const audioDelta = {
+        event: 'playAudio',
+        media: {
+          contentType: 'audio/x-mulaw',
+          sampleRate: 8000,
+          payload: Buffer.from(data).toString('base64')
+        }
+      };
+      plivoWs.send(JSON.stringify(audioDelta));
+    });
+
+    ttsConnection.on('close', () => {
+      console.log('🔌 Initial greeting TTS connection closed');
+    });
+
+    ttsConnection.on('error', (error) => {
+      console.error('❌ Initial greeting TTS error:', error);
+    });
+
+  } catch (error) {
+    console.error('❌ Error sending initial greeting:', error);
+  }
+
   // Initialize conversation in database
   try {
     const { data: existingCall, error: checkError } = await supabase
@@ -586,8 +712,8 @@ app.ws('/listen', async (plivoWs, req) => {
         .insert([{
           call_uuid: callId,
           status: 'connected',
-          call_type: 'inbound',
-          direction: 'INBOUND',
+          call_type: 'outbound',  // Changed from 'inbound' to 'outbound'
+          direction: 'OUTBOUND',  // Changed from 'INBOUND' to 'OUTBOUND'
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         }]);
@@ -632,7 +758,7 @@ app.ws('/listen', async (plivoWs, req) => {
                 console.log('✅ Settings successfully applied');
                 break;
               case 'Welcome':
-                console.log('👋 Received welcome message');
+                console.log('👋 Received welcome message with request_id:', response.request_id);
                 break;
               case 'UserStartedSpeaking':
                 console.log('🗣️ User started speaking');
@@ -642,19 +768,22 @@ app.ws('/listen', async (plivoWs, req) => {
                   stream_id: streamId
                 }));
                 break;
-              case 'Transcription':
+              case 'ConversationText':
                 // Save transcript to database
                 await supabase.from('transcripts').insert([{
                   call_uuid: callId,
                   transcript: response.text,
-                  speaker: 'user',
+                  speaker: response.speaker || 'user',
                   confidence: response.confidence || 1.0,
                   is_processed: true,
                   timestamp: new Date().toISOString()
                 }]);
                 break;
               case 'Error':
-                console.error('❌ Deepgram error:', response.error);
+                console.error('❌ Deepgram error:', response.description, 'Code:', response.code);
+                break;
+              case 'Warning':
+                console.warn('⚠️ Deepgram warning:', response.description);
                 break;
               default:
                 console.log('📥 Other response:', response);
