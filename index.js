@@ -266,9 +266,9 @@ const textUtils = {
       .replace(/(\w)dunno(\w)?/g, '$1don\'t know$2');
   },
 
+  // Accept very short utterances such as "Yes" or "No".
   hasMinimumQuality: (text) => {
-    const words = text.split(/\s+/);
-    return words.length >= 2 && text.length >= 5;
+    return text.trim().length >= 2;
   }
 };
 
@@ -491,7 +491,7 @@ app.all('/plivo-xml', (req, res) => {
     keepCallAlive="true"
     bidirectional="true"
     contentType="audio/x-mulaw;rate=8000"
-    track="inbound"
+    audioTrack="inbound"
     statusCallbackUrl="${baseUrl}/api/stream-status"
   >wss://${wsHost}/listen?call_uuid=${callUUID}</Stream>
 </Response>`;
@@ -729,6 +729,21 @@ app.ws('/listen', async (plivoWs, req) => {
                   } catch (ttsError) {
                     console.error("❌ Failed to send fallback response:", ttsError);
                   }
+                }
+              } else {
+                // Utterance too short — reply with a simple fallback to keep the call alive.
+                const fallbackResponse = FALLBACK_RESPONSES[Math.floor(Math.random() * FALLBACK_RESPONSES.length)];
+                console.log("⚠️ Utterance below quality threshold, using fallback:", fallbackResponse);
+                await transcriptManager.saveTranscript(callId, {
+                  text: fallbackResponse,
+                  speaker: 'agent',
+                  confidence: 1.0,
+                  is_final: true
+                });
+                try {
+                  await sendTTSResponse(plivoWs, fallbackResponse);
+                } catch (ttsError) {
+                  console.error("❌ Failed to send fallback response:", ttsError);
                 }
               }
             }
