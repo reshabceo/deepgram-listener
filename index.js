@@ -184,7 +184,7 @@ const textUtils = {
 // Plivo client
 const plivoClient = new plivo.Client(process.env.PLIVO_AUTH_ID, process.env.PLIVO_AUTH_TOKEN);
 
-// Deepgram TTS
+// Deepgram TTS - FIXED STREAMING (use async iteration)
 const sendTTSResponse = async (plivoWs, text) => {
   const dg = createClient(process.env.DEEPGRAM_API_KEY);
   console.log('🔊 TTS: Sending text:', text);
@@ -192,11 +192,11 @@ const sendTTSResponse = async (plivoWs, text) => {
     const response = await dg.speak.request({ text }, { model: 'aura-2-thalia-en', encoding: 'mulaw', sample_rate: 8000, container: 'none' });
     const stream = await response.getStream();
     if (!stream) throw new Error('No TTS stream available');
-    stream.on('data', chunk => {
+    // THE FIX: for await...of instead of .on('data')
+    for await (const chunk of stream) {
       plivoWs.send(JSON.stringify({ event: 'media', media: { payload: Buffer.from(chunk).toString('base64') } }));
-    });
-    stream.on('end', () => console.log('🔊 TTS stream ended'));
-    stream.on('error', err => console.error('❌ TTS stream error:', err));
+    }
+    console.log('🔊 TTS stream ended');
   } catch (err) {
     console.error('❌ sendTTSResponse error:', err);
   }
@@ -248,6 +248,25 @@ app.ws('/listen', async (plivoWs, req) => {
   const callId = req.query.call_uuid;
   if (!callId) return plivoWs.close();
   console.log('📞 WS /listen connected:', callId);
+
+  // Make sure a 'calls' row exists for this callId (foreign key for transcripts)
+  try {
+    const { data: existing, error: checkError } = await supabase
+      .from('calls')
+      .select('call_uuid')
+      .eq('call_uuid', callId)
+      .single();
+    if (checkError || !existing) {
+      await supabase.from('calls').insert([{
+        call_uuid:    callId,
+        status:       'connected',
+        call_type:    'outbound',
+        direction:    'OUTBOUND',
+        created_at:   new Date().toISOString(),
+        updated_at:   new Date().toISOString()
+      }]);
+    }
+  } catch (e) { console.error('Error creating call record:', e); }
 
   // Keep-alive ping
   plivoWs.ping();
@@ -378,30 +397,4 @@ app.post('/api/stream-status', async (req, res) => {
 });
 
 // Test Plivo credentials
-app.get('/api/plivo/test', async (req, res) => {
-  try {
-    const account = await plivoClient.accounts.get(process.env.PLIVO_AUTH_ID);
-    const numbers = await plivoClient.numbers.list();
-    res.json({ success: true, account: { type: account.accountType, status: account.status }, numbers });
-  } catch (error) {
-    console.error('❌ plivo test error:', error);
-    res.status(500).json({ success: false, error: 'Test failed', details: error.message });
-  }
-});
-
-// Health check
-app.get('/api/test', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Error and 404 handlers
-app.use((err, req, res, next) => {
-  console.error('❌ Server error:', err);
-  res.status(500).json({ success: false, error: 'Internal server error', details: err.message });
-});
-app.use((req, res) => {
-  res.status(404).json({ success: false, error: 'Route not found', path: req.path });
-});
-
-// Start server
-server.listen(port, () => console.log(`✅ AI Voice Agent running on port ${port}`));
+app.get('/api
