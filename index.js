@@ -190,61 +190,52 @@ const sendTTSResponse = async (plivoWs, text) => {
   console.log('🔊 TTS: Sending text:', text);
   try {
     console.log('🎵 Requesting TTS from Deepgram...');
-    const response = await dg.speak.request({ 
-      text 
-    }, { 
+    const response = await dg.speak.request({ text }, { 
       model: 'aura-2-thalia-en', 
       encoding: 'mulaw', 
       sample_rate: 8000, 
-      container: 'none', 
+      container: 'none',
       streaming: true 
     });
-
-    // Wait before sending first chunk
-    await new Promise(resolve => setTimeout(resolve, 200));
-
+    
+    console.log('🎵 Got TTS response, getting stream...');
     const stream = await response.getStream();
     if (!stream) throw new Error('No TTS stream available');
 
-    let buffer = Buffer.alloc(0);
-    const CHUNK_SIZE = 320;
-    let totalChunks = 0;
     let totalBytes = 0;
+    let totalChunks = 0;
+    
+    // Start real-time streaming
+    console.log('🎵 Starting real-time audio streaming...');
+    
+    // Send speak event to initialize audio stream
+    plivoWs.send(JSON.stringify({ event: 'speak' }));
+    
     for await (const chunk of stream) {
-      buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
-      totalBytes += chunk.length;
-      while (buffer.length >= CHUNK_SIZE) {
-        const audioChunk = buffer.slice(0, CHUNK_SIZE);
-        buffer = buffer.slice(CHUNK_SIZE);
-        plivoWs.send(JSON.stringify({
-          event: 'media',
-          media: { payload: audioChunk.toString('base64') }
-        }));
-        totalChunks++;
-        await new Promise(resolve => setTimeout(resolve, 20));
+      if (plivoWs.readyState !== WebSocket.OPEN) {
+        console.log('⚠️ WebSocket closed during streaming');
+        break;
       }
-    }
-    // Send remaining audio (if any)
-    if (buffer.length > 0) {
-      // Pad with silence if last chunk < 320 bytes
-      const padded = Buffer.concat([buffer, Buffer.alloc(CHUNK_SIZE - buffer.length, 0x7f)]);
-      plivoWs.send(JSON.stringify({
-        event: 'media',
-        media: { payload: padded.toString('base64') }
+
+      // Send audio chunk immediately
+      plivoWs.send(JSON.stringify({ 
+        event: 'media', 
+        media: { 
+          payload: Buffer.from(chunk).toString('base64'),
+          timestamp: Date.now()
+        }
       }));
+      
+      totalBytes += chunk.length;
       totalChunks++;
     }
-    // Add 200ms (10 chunks) of silence
-    const SILENCE_MULAW = Buffer.alloc(CHUNK_SIZE, 0x7f);
-    for (let i = 0; i < 10; i++) {
-      plivoWs.send(JSON.stringify({
-        event: 'media',
-        media: { payload: SILENCE_MULAW.toString('base64') }
-      }));
-      await new Promise(resolve => setTimeout(resolve, 20));
+    
+    // Send flush event to ensure all audio is played
+    if (plivoWs.readyState === WebSocket.OPEN) {
+      plivoWs.send(JSON.stringify({ event: 'flush' }));
     }
+    
     console.log(`🎵 Audio streaming complete: ${totalChunks} chunks, ${totalBytes} bytes sent`);
-    console.log('🔈 Sent silence padding at end');
     console.log('🔊 TTS stream ended');
   } catch (err) {
     console.error('❌ sendTTSResponse error:', err);
@@ -278,23 +269,13 @@ async function generateAIResponse(callId, userMessage) {
   }
 }
 
-// Plivo XML handler (audioTrack="both" is critical!)
+// Plivo XML handler
 const plivoXmlHandler = (req, res) => {
   const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Stream
-    bidirectional="true"
-    keepCallAlive="true"
-    streamTimeout="3600"
-    contentType="audio/x-mulaw;rate=8000"
-    audioTrack="outbouund"
-    statusCallbackUrl="${baseUrl}/api/stream-status"
-  >${wsUrl}</Stream>
-</Response>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
   console.log('📝 Generated Plivo XML:', wsUrl);
   res.set('Content-Type','text/xml');
   res.send(xml);
@@ -429,9 +410,12 @@ app.post('/api/calls/initiate', async (req, res) => {
           answerMethod: 'GET',
           statusCallbackUrl: `${baseUrl}/api/calls/status`,
           statusCallbackMethod: 'POST',
+          // Add ring timeout
           ringTimeout: 60,
+          // Add machine detection
           machineDetection: true,
           machineDetectionTime: 5000,
+          // Add fallback URL in case primary fails
           fallbackMethod: 'GET',
           fallbackUrl: `${baseUrl}/plivo-xml`
         };
@@ -515,3 +499,4 @@ app.use((req, res) => {
 
 // Start server
 server.listen(port, () => console.log(`✅ AI Voice Agent running on port ${port}`));
+
