@@ -31,8 +31,9 @@ for (const envVar of requiredEnvVars) {
 }
 
 const app = express();
-expressWs(app);
 const server = http.createServer(app);
+// Attach express-ws to both app and server for ESM + custom server compatibility
+expressWs(app, server);
 server.setTimeout(120000); // Set server timeout to 2 minutes
 
 // Add middleware
@@ -504,56 +505,8 @@ app.get('/', (req, res) => {
   res.send('✅ Deepgram Voice Agent is running');
 });
 
-// Replace your existing '/plivo-xml' handler with this exact block:
-app.all('/plivo-xml', (req, res) => {
-  const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
-  const callUUID = req.query.CallUUID || req.body.CallUUID || '';
-  const wsHost = baseUrl.replace(/^https?:\/\//, '');
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Stream
-    streamTimeout="3600"
-    keepCallAlive="true"
-    bidirectional="true"
-    contentType="audio/x-mulaw;rate=8000"
-    audioTrack="inbound"
-    statusCallbackUrl="${baseUrl}/api/stream-status"
-  >wss://${wsHost}/listen?call_uuid=${callUUID}</Stream>
-</Response>`;
-
-  console.log('📝 Generated XML:', xml);
-  res.set('Content-Type', 'text/xml');
-  res.send(xml);
-});
-
-// Initialize Deepgram client
-const deepgram = new createClient(process.env.DEEPGRAM_API_KEY);
-
-// Add initial greeting message
-const INITIAL_GREETING = "Hello, this is Boostmysites AI officer. How can I assist you today?";
-
-// Deepgram WebSocket initialization
-async function initializeDeepgramWebSocket() {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket('wss://api.deepgram.com/v1/listen', {
-      headers: {
-        Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`
-      }
-    });
-    ws.on('open', () => resolve(ws));
-    ws.on('error', (err) => {
-      console.error('❌ Deepgram WebSocket connection error:', err);
-      reject(err);
-    });
-    ws.on('close', (code, reason) => {
-      console.error('❌ Deepgram WebSocket closed unexpectedly:', code, reason);
-      // Optionally, implement reconnection logic here
-    });
-  });
-}
-
-// Update the WebSocket listener section
+// WebSocket route for Plivo audio streaming
+// Plivo should connect via WebSocket, not HTTP GET. 404s for GET /listen are normal.
 app.ws('/listen', async (plivoWs, req) => {
   const callId = req.query.call_uuid;
   if (!callId) {
@@ -931,3 +884,17 @@ app.use((req, res) => {
     path: req.path
   });
 });
+
+// Confirm Plivo XML is generating the correct WebSocket URL
+app.all('/plivo-xml', (req, res) => {
+  const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
+  const callUUID = req.query.CallUUID || req.body.CallUUID || '';
+  const wsHost = baseUrl.replace(/^https?:\/\//, '');
+  const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    streamTimeout="3600"\n    keepCallAlive="true"\n    bidirectional="true"\n    contentType="audio/x-mulaw;rate=8000"\n    audioTrack="inbound"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
+  console.log('📝 Generated XML for Plivo, WebSocket URL:', wsUrl);
+  res.set('Content-Type', 'text/xml');
+  res.send(xml);
+});
+
+// Reminder: If Plivo is not connecting via WebSocket, double-check your Plivo application config and the generated XML above.
