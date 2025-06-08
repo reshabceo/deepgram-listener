@@ -192,10 +192,10 @@ const sendTTSResponse = async (plivoWs, text) => {
     console.log('🎵 Requesting TTS from Deepgram...');
     const response = await dg.speak.request({ text }, { 
       model: 'aura-2-thalia-en', 
-      encoding: 'mulaw',
-      sample_rate: 8000,
+      encoding: 'mulaw', 
+      sample_rate: 8000, 
       container: 'none',
-      streaming: true
+      streaming: true 
     });
     
     console.log('🎵 Got TTS response, getting stream...');
@@ -204,16 +204,12 @@ const sendTTSResponse = async (plivoWs, text) => {
 
     // Buffer to accumulate audio chunks
     let buffer = Buffer.alloc(0);
-    const CHUNK_SIZE = 160; // 20ms of 8kHz mulaw audio (reduced from 320 to match Plivo's expectations)
+    const CHUNK_SIZE = 320; // 20ms of 8kHz mulaw audio
     let totalChunks = 0;
     let totalBytes = 0;
     
     // Process stream with proper timing
     console.log('🎵 Starting audio stream processing...');
-    
-    // Send initial speak event
-    plivoWs.send(JSON.stringify({ event: 'speak' }));
-    
     for await (const chunk of stream) {
       buffer = Buffer.concat([buffer, Buffer.from(chunk)]);
       totalBytes += chunk.length;
@@ -223,40 +219,24 @@ const sendTTSResponse = async (plivoWs, text) => {
         const audioChunk = buffer.slice(0, CHUNK_SIZE);
         buffer = buffer.slice(CHUNK_SIZE);
         
-        if (plivoWs.readyState === WebSocket.OPEN) {
-          plivoWs.send(JSON.stringify({ 
-            event: 'media', 
-            media: { 
-              payload: audioChunk.toString('base64'),
-              timestamp: Date.now()
-            }
-          }));
-          totalChunks++;
-          
-          // Wait 20ms before sending next chunk for proper timing
-          await new Promise(resolve => setTimeout(resolve, 20));
-        } else {
-          console.log('⚠️ WebSocket closed during audio streaming');
-          return;
-        }
+        plivoWs.send(JSON.stringify({ 
+          event: 'media', 
+          media: { payload: audioChunk.toString('base64') }
+        }));
+        totalChunks++;
+        
+        // Wait 20ms before sending next chunk
+        await new Promise(resolve => setTimeout(resolve, 20));
       }
     }
     
     // Send any remaining audio
-    if (buffer.length > 0 && plivoWs.readyState === WebSocket.OPEN) {
+    if (buffer.length > 0) {
       plivoWs.send(JSON.stringify({ 
         event: 'media', 
-        media: { 
-          payload: buffer.toString('base64'),
-          timestamp: Date.now()
-        }
+        media: { payload: buffer.toString('base64') }
       }));
       totalChunks++;
-    }
-    
-    // Send flush event to ensure all audio is played
-    if (plivoWs.readyState === WebSocket.OPEN) {
-      plivoWs.send(JSON.stringify({ event: 'flush' }));
     }
     
     console.log(`🎵 Audio streaming complete: ${totalChunks} chunks, ${totalBytes} bytes sent`);
@@ -299,7 +279,7 @@ const plivoXmlHandler = (req, res) => {
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    audioTrack="both"\n    extraHeaders=""\n    webSocketTimeout="120"\n    maxDuration="14400"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    audioTrack="inbound"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
   console.log('📝 Generated Plivo XML:', wsUrl);
   res.set('Content-Type','text/xml');
   res.send(xml);
