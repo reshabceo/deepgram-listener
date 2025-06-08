@@ -1,16 +1,16 @@
 // Test deploy: should see this in logs!
 
-require('dotenv').config();
-
-const express = require('express');
-const expressWs = require('express-ws');
-const WebSocket = require('ws');
-const axios = require('axios');
-const { createClient } = require('@supabase/supabase-js');
-const fetch = require('node-fetch');
-const plivo = require('plivo');
-const { Deepgram } = require('@deepgram/sdk');
-const { createClient: createDeepgramClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
+import express from 'express';
+import expressWs from 'express-ws';
+import WebSocket from 'ws';
+import axios from 'axios';
+import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
+import fetch from 'node-fetch';
+import plivo from 'plivo';
+import dotenv from 'dotenv';
+import http from 'http';
+dotenv.config();
 
 // Validate required environment variables
 const requiredEnvVars = [
@@ -32,6 +32,8 @@ for (const envVar of requiredEnvVars) {
 
 const app = express();
 expressWs(app);
+const server = http.createServer(app);
+server.setTimeout(120000); // Set server timeout to 2 minutes
 
 // Add middleware
 app.use(express.json());
@@ -53,7 +55,7 @@ const requestTimestamps = [];
 const SYSTEM_PROMPT = `You are a voice-based AI assistant on a phone call. You can hear the caller through speech recognition and respond verbally. Keep responses brief, natural, and focused. You should be professional but conversational. Never say you are a text-based assistant or that you cannot hear – you CAN hear through speech recognition.`;
 
 // Supabase client
-const supabase = createClient(
+const supabase = createSupabaseClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY,
   {
@@ -355,7 +357,7 @@ app.post('/api/plivo/create-ai-assistant', async (req, res) => {
 // Refactored TTS using Deepgram REST API with streaming
 const sendTTSResponse = async (plivoWs, text) => {
   const deepgramApiKey = process.env.DEEPGRAM_API_KEY;
-  const deepgram = createDeepgramClient(deepgramApiKey);
+  const deepgram = createClient(deepgramApiKey);
   try {
     const response = await deepgram.speak.request(
       { text },
@@ -526,7 +528,7 @@ app.all('/plivo-xml', (req, res) => {
 });
 
 // Initialize Deepgram client
-const deepgram = new Deepgram(process.env.DEEPGRAM_API_KEY);
+const deepgram = new createClient(process.env.DEEPGRAM_API_KEY);
 
 // Add initial greeting message
 const INITIAL_GREETING = "Hello, this is Boostmysites AI officer. How can I assist you today?";
@@ -606,7 +608,7 @@ app.ws('/listen', async (plivoWs, req) => {
   }
 
   // Initialize Deepgram SDK client for live transcription
-  const deepgram = createDeepgramClient(process.env.DEEPGRAM_API_KEY);
+  const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
   const dgConnection = deepgram.listen.live({
     model: 'nova-3',
     language: 'en-US',
@@ -720,7 +722,7 @@ app.ws('/listen', async (plivoWs, req) => {
 });
 
 // Start server
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`✅ Deepgram Voice Agent running on port ${port}...`);
 });
 
@@ -833,8 +835,13 @@ app.post('/api/calls/status', async (req, res) => {
 
 // Add error handling to /api/stream-status
 app.post('/api/stream-status', async (req, res) => {
+  console.log('🔄 Raw /api/stream-status body:', req.body);
+  console.log('🔄 Headers:', req.headers);
+  if (!req.body || Object.keys(req.body).length === 0) {
+    console.error('❌ /api/stream-status: Empty or malformed request body');
+    return res.status(400).json({ error: 'Empty or malformed request body' });
+  }
   try {
-    console.log('🔄 Incoming /api/stream-status request:', JSON.stringify(req.body));
     const {
       CallUUID,
       StreamStatus,
@@ -845,16 +852,21 @@ app.post('/api/stream-status', async (req, res) => {
     if (ErrorCode) {
       console.error(`❌ Stream error: ${ErrorCode} - ${ErrorMessage}`);
     }
+    const insertData = {
+      call_uuid: CallUUID,
+      status: StreamStatus,
+      error_code: ErrorCode,
+      error_message: ErrorMessage,
+      timestamp: new Date().toISOString()
+    };
+    console.log('🔄 Attempting to insert into stream_status:', insertData);
     const { error } = await supabase
       .from('stream_status')
-      .insert([{
-        call_uuid: CallUUID,
-        status: StreamStatus,
-        error_code: ErrorCode,
-        error_message: ErrorMessage,
-        timestamp: new Date().toISOString()
-      }]);
-    if (error) throw error;
+      .insert([insertData]);
+    if (error) {
+      console.error('❌ Supabase insert error:', error);
+      throw error;
+    }
     res.json({ message: 'Stream status updated' });
   } catch (error) {
     console.error('❌ Error updating stream status:', error);
