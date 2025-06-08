@@ -204,7 +204,7 @@ const sendTTSResponse = async (plivoWs, text) => {
 
     // Buffer to accumulate audio chunks
     let buffer = Buffer.alloc(0);
-    const CHUNK_SIZE = 320; // 20ms of 8kHz mulaw audio
+    const CHUNK_SIZE = 160; // 20ms of 8kHz mulaw audio (8000 samples/sec * 0.02 sec)
     let totalChunks = 0;
     let totalBytes = 0;
     
@@ -225,13 +225,18 @@ const sendTTSResponse = async (plivoWs, text) => {
         }));
         totalChunks++;
         
-        // Wait 20ms before sending next chunk
+        // Wait exactly 20ms for proper timing (8kHz = 160 samples per 20ms)
         await new Promise(resolve => setTimeout(resolve, 20));
       }
     }
     
     // Send any remaining audio
     if (buffer.length > 0) {
+      // Pad the last chunk with silence if needed
+      if (buffer.length < CHUNK_SIZE) {
+        const padding = Buffer.alloc(CHUNK_SIZE - buffer.length, 0xFF);
+        buffer = Buffer.concat([buffer, padding]);
+      }
       plivoWs.send(JSON.stringify({ 
         event: 'media', 
         media: { payload: buffer.toString('base64') }
@@ -279,7 +284,7 @@ const plivoXmlHandler = (req, res) => {
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    audioTrack="inbound"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Stream\n    bidirectional="true"\n    keepCallAlive="true"\n    streamTimeout="3600"\n    contentType="audio/x-mulaw;rate=8000"\n    audioTrack="both"\n    statusCallbackUrl="${baseUrl}/api/stream-status"\n  >${wsUrl}</Stream>\n</Response>`;
   console.log('📝 Generated Plivo XML:', wsUrl);
   res.set('Content-Type','text/xml');
   res.send(xml);
