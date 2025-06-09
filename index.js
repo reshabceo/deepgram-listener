@@ -39,31 +39,17 @@ const greetingFile = path.join(TTS_DIR, 'greeting.mp3');
 // Pre-buffer the greeting audio
 let greetingBuffer = null;
 
-async function loadGreetingBuffer() {
-  try {
-    greetingBuffer = await fs.readFile(greetingFile);
-    console.log('✅ Greeting audio pre-buffered');
-  } catch (error) {
-    console.error('❌ Failed to pre-buffer greeting:', error);
-  }
-}
-
-// Utility: file existence
-async function fileExists(f) {
-  try { await fs.access(f); return true; } catch { return false; }
-}
-
-// Utility: Generate TTS file (Deepgram to WAV)
+// Optimize TTS settings for faster delivery
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
   
-  // Move parameters to URL query string
+  // Optimize URL parameters for smaller, faster audio
   const url = new URL('https://api.deepgram.com/v1/speak');
   url.searchParams.append('encoding', 'mp3');
   url.searchParams.append('model', 'aura-asteria-en');
-  url.searchParams.append('voice', 'asteria');
-  url.searchParams.append('rate', '0.9');
-  url.searchParams.append('pitch', '1.1');
+  url.searchParams.append('speed', '1.1');  // Slightly faster
+  url.searchParams.append('quality', 'low'); // Lower quality for faster transfer
+  url.searchParams.append('sample_rate', '8000'); // Lower sample rate
 
   const resp = await fetch(url.toString(), {
     method: 'POST',
@@ -72,7 +58,7 @@ async function generateGreeting() {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text: GREETING_TEXT  // Only text in the body
+      text: GREETING_TEXT
     })
   });
 
@@ -84,28 +70,46 @@ async function generateGreeting() {
 
   const buffer = Buffer.from(await resp.arrayBuffer());
   if (buffer.length < 1000) {
-    console.error("❌ TTS audio is too short! Response likely not audio.");
-    throw new Error("Deepgram did not return valid audio. Check your API key, balance, and model.");
+    console.error("❌ TTS audio is too short!");
+    throw new Error("Invalid audio generated");
   }
 
+  // Store in memory and file
+  greetingBuffer = buffer;
   await fs.writeFile(greetingFile, buffer);
-  console.log("✅ Greeting TTS MP3 generated.");
+  console.log("✅ Greeting TTS MP3 generated and cached");
 }
 
-// Serve the greeting audio with pre-buffered content
+// Optimized audio serving with proper headers
 app.get('/tts-audio/greeting.mp3', async (req, res) => {
+  // Set performance-oriented headers
   res.setHeader('Content-Type', 'audio/mpeg');
-  if (greetingBuffer) {
+  res.setHeader('Cache-Control', 'public, max-age=31536000');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Accept-Ranges', 'bytes');
+
+  try {
+    // Use in-memory buffer if available
+    if (greetingBuffer) {
+      res.setHeader('Content-Length', greetingBuffer.length);
+      res.send(greetingBuffer);
+      return;
+    }
+
+    // Load and cache if not in memory
+    greetingBuffer = await fs.readFile(greetingFile);
+    res.setHeader('Content-Length', greetingBuffer.length);
     res.send(greetingBuffer);
-  } else {
-    res.sendFile(greetingFile);
+  } catch (error) {
+    console.error('❌ Error serving greeting audio:', error);
+    res.status(500).send('Error serving audio');
   }
 });
 
 // Track call states
 const callStates = new Map();
 
-// Plivo XML handler - Single response with Play and Stream
+// Plivo XML handler with optimized response
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
   console.log('📞 New call initiated:', callUUID);
@@ -113,6 +117,10 @@ app.all('/plivo-xml', (req, res) => {
   const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
   const wsHost = BASE_URL.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
+  
+  // Set response headers for faster delivery
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -125,7 +133,7 @@ app.all('/plivo-xml', (req, res) => {
   >${wsUrl}</Stream>
 </Response>`;
   
-  console.log('📝 Generated Plivo XML:', xml);
+  console.log('📝 Generated Plivo XML');
   res.type('text/xml').send(xml);
 });
 
@@ -203,12 +211,25 @@ app.ws('/listen', (ws, req) => {
   });
 });
 
-// Start server & initialize
+// Initialize server with pre-loading
 const port = process.env.PORT || 3000;
-generateGreeting()
-  .then(loadGreetingBuffer)
-  .then(() => {
-    server.listen(port, () => {
-      console.log(`Server running on port ${port}`);
-    });
+
+// Pre-load greeting before starting server
+async function initServer() {
+  try {
+    await generateGreeting();
+    // Pre-load greeting into memory
+    if (await fileExists(greetingFile)) {
+      greetingBuffer = await fs.readFile(greetingFile);
+      console.log('✅ Greeting audio pre-loaded into memory');
+    }
+  } catch (error) {
+    console.error('❌ Error during initialization:', error);
+  }
+
+  server.listen(port, () => {
+    console.log(`Server running on port ${port}`);
   });
+}
+
+initServer();
