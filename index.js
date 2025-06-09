@@ -1,91 +1,80 @@
 // index.js
-import dotenv from 'dotenv';
-dotenv.config();
-
+import 'dotenv/config';
 import express from 'express';
+import expressWs from 'express-ws';
 import http from 'http';
-import { WebSocketServer } from 'ws';
-import { createClient as createDGClient } from '@deepgram/sdk';
+import { createClient as createDG } from '@deepgram/sdk';
 
-const PORT = process.env.PORT || 3000;
-const DG_KEY = process.env.DEEPGRAM_API_KEY;
-if (!DG_KEY) {
-  console.error('❌  Missing DEEPGRAM_API_KEY in .env');
+const {
+  DEEPGRAM_API_KEY,
+  PORT = 3000,
+  // you’ll wire in PLIVO_WS_URL when you switch to half-duplex
+} = process.env;
+
+if (!DEEPGRAM_API_KEY) {
+  console.error('❌ Missing DEEPGRAM_API_KEY');
   process.exit(1);
 }
 
-// 1) Stand up Express + HTTP server
+// — Express + WebSocket setup —
 const app = express();
 const server = http.createServer(app);
+expressWs(app, server);
 
-// 2) Deepgram STT WebSocket endpoint (/listen)
-const sttWSS = new WebSocketServer({ server, path: '/listen' });
+// — 1) STT listener for inbound audio —
+// Plivo will connect here with your caller’s audio
+app.ws('/listen', (plivoWs) => {
+  console.log('🔗 STT WebSocket connected');
 
-sttWSS.on('connection', (plivoWs) => {
-  console.log('🔗  /listen WebSocket connected (awaiting inbound μ-law)');
+  // As soon as you want to speak back, call sendTTS(plivoWs, text)
+  // e.g. in response to an STT-turn-complete event
 
-  // Create Deepgram STT live stream
-  const dgClient = createDGClient(DG_KEY);
-  const dgStream = dgClient.transcription.live({
-    model: 'nova-2',
-    language: 'en-US',
-    encoding: 'mulaw',
-    sample_rate: 8000
+  plivoWs.on('message', msg => {
+    // parse Deepgram STT messages if you forward them here
   });
 
-  dgStream.on('open',       () => console.log('✅  Deepgram STT open'));
-  dgStream.on('close',      () => console.log('🔌  Deepgram STT closed'));
-  dgStream.on('error',      (err) => console.error('🚨  Deepgram STT error:', err));
-  dgStream.on('transcript', (data) => {
-    const alt = data.channel.alternatives[0];
-    if (alt.transcript) console.log(`📝 Transcript: "${alt.transcript}"`);
-  });
-
-  // Forward incoming Plivo audio → Deepgram STT
-  plivoWs.on('message', (msg) => {
-    try {
-      const pkt = JSON.parse(msg);
-      if (pkt.event === 'media' && pkt.media?.payload) {
-        const audio = Buffer.from(pkt.media.payload, 'base64');
-        dgStream.send(audio);
-      }
-    } catch (e) {
-      console.error('❌  WS parse error:', e);
-    }
-  });
-
-  plivoWs.on('close', () => {
-    dgStream.finish();
-    console.log('❌  /listen WS disconnected');
-  });
+  plivoWs.on('close', () => console.log('❌ STT WebSocket disconnected'));
 });
 
-// 3) Test Deepgram streaming TTS immediately
-(async () => {
-  const dg = createDGClient(DG_KEY);
-  console.log('🔌  Connecting to Deepgram TTS WebSocket…');
+// — 2) sendTTS helper — streams Deepgram TTS chunks into Plivo WS —
+async function sendTTS(plivoWs, text) {
+  const dg = createDG(DEEPGRAM_API_KEY);
   const response = await dg.speak.request(
-    { text: 'Hello, this is a low-latency TTS test.' },
-    {
-      model: 'aura-2-thalia-en',
-      streaming: true,
-      encoding: 'mulaw',
-      sample_rate: 8000
-    }
+    { text },
+    { model: 'aura-2-thalia-en', streaming: true }
   );
-
   const stream = await response.getStream();
-  let total = 0;
-  stream.on('data', (chunk) => {
-    total += chunk.length;
-    console.log(`▶️  Got ${chunk.length} bytes  (total ${total})`);
-  });
-  stream.on('end', () => console.log('✅  TTS stream ended, total bytes:', total));
-  stream.on('error', (err) => console.error('🚨  TTS WebSocket error:', err));
-})();
 
-// 4) Launch server
+  for await (const chunk of stream) {
+    plivoWs.send(JSON.stringify({
+      event: 'media',
+      media: { payload: Buffer.from(chunk).toString('base64') }
+    }));
+  }
+  // once done, you may send a 'flush' event if Plivo needs it:
+  plivoWs.send(JSON.stringify({ event: 'flush' }));
+}
+
+// — 3) Demo TTS on startup to prove low latency — remove once integrated —
+async function testTTS() {
+  console.log('🔌 Connecting to Deepgram TTS test…');
+  // we won’t pipe that into Plivo here, just log
+  const dg = createDG(DEEPGRAM_API_KEY);
+  const res = await dg.speak.request(
+    { text: 'Hello, low latency test.' },
+    { model: 'aura-2-thalia-en', streaming: true }
+  );
+  let total = 0;
+  for await (const chunk of await res.getStream()) {
+    total += chunk.length;
+    console.log(`▶️  Chunk: ${chunk.length} bytes (total ${total})`);
+  }
+  console.log('✅ Test stream ended');
+}
+testTTS().catch(console.error);
+
+// — 4) Start server —
 server.listen(PORT, () => {
-  console.log(`✅  Server listening on http://localhost:${PORT}/`);
-  console.log(`    ▶  STT WS at ws://localhost:${PORT}/listen`);
+  console.log(`✅ Server listening on http://localhost:${PORT}`);
+  console.log(`   • STT WS at ws://localhost:${PORT}/listen`);
 });
