@@ -292,44 +292,59 @@ const plivoXmlHandler = async (req, res) => {
   const callUUID = req.query.CallUUID || req.body.CallUUID || '';
   const state = req.query.state || 'listen';
   const turn = parseInt(req.query.turn || '1');
-  const audioFile = req.query.audio_file;
   const wsHost = baseUrl.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
   
   let xml;
   
-  switch (state) {
-    case 'play':
-      if (!audioFile) {
-        console.error('❌ No audio file specified for play state');
-        // Fallback to listen state if no audio file
-        xml = `<?xml version="1.0" encoding="UTF-8"?>
+  try {
+    switch (state) {
+      case 'play':
+        // Get the audio file for this turn from Supabase
+        const { data: audioData, error: audioError } = await supabase
+          .from('call_audio')
+          .select('audio_file')
+          .eq('call_uuid', callUUID)
+          .eq('turn', turn)
+          .single();
+          
+        if (audioError || !audioData?.audio_file) {
+          console.error('❌ No audio file found for turn', turn);
+          // Fallback to listen state if no audio file
+          xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Redirect>${baseUrl}/plivo-xml?state=listen&amp;call_uuid=${callUUID}&amp;turn=${turn}</Redirect>
 </Response>`;
-        break;
-      }
-      
-      // First play the audio, then redirect back to listen state
-      xml = `<?xml version="1.0" encoding="UTF-8"?>
+          break;
+        }
+        
+        // First play the audio, then redirect back to listen state
+        xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Play>${baseUrl}/tts-audio/${audioFile}</Play>
+    <Play>${baseUrl}/tts-audio/${audioData.audio_file}</Play>
     <Redirect>${baseUrl}/plivo-xml?state=listen&amp;call_uuid=${callUUID}&amp;turn=${turn + 1}</Redirect>
 </Response>`;
-      break;
-      
-    case 'redirect_to_play':
-      // Used by WebSocket handler to transition to play state
-      xml = `<?xml version="1.0" encoding="UTF-8"?>
+        break;
+        
+      case 'listen':
+      default:
+        // Check if there's a pending audio file for the current turn
+        const { data: pendingAudio, error: pendingError } = await supabase
+          .from('call_audio')
+          .select('audio_file')
+          .eq('call_uuid', callUUID)
+          .eq('turn', turn)
+          .single();
+          
+        if (pendingAudio?.audio_file) {
+          // If there's pending audio, redirect to play it
+          xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Redirect>${baseUrl}/plivo-xml?state=play&amp;call_uuid=${callUUID}&amp;turn=${turn}&amp;audio_file=${audioFile}</Redirect>
+    <Redirect>${baseUrl}/plivo-xml?state=play&amp;call_uuid=${callUUID}&amp;turn=${turn}</Redirect>
 </Response>`;
-      break;
-      
-    case 'listen':
-    default:
-      // Default streaming state for listening
-      xml = `<?xml version="1.0" encoding="UTF-8"?>
+        } else {
+          // Otherwise, start listening
+          xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Stream
         bidirectional="true"
@@ -338,10 +353,24 @@ const plivoXmlHandler = async (req, res) => {
         statusCallbackUrl="${baseUrl}/api/stream-status"
     >${wsUrl}</Stream>
 </Response>`;
-      break;
+        }
+        break;
+    }
+  } catch (error) {
+    console.error('❌ XML handler error:', error);
+    // Fallback to listening state
+    xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Stream
+        bidirectional="true"
+        audioTrack="inbound"
+        contentType="audio/x-mulaw;rate=8000"
+        statusCallbackUrl="${baseUrl}/api/stream-status"
+    >${wsUrl}</Stream>
+</Response>`;
   }
   
-  console.log('📝 Generated Plivo XML:', xml);
+  console.log('📝 Generated Plivo XML:', { state, turn, xml });
   res.set('Content-Type', 'text/xml');
   res.send(xml);
 };
