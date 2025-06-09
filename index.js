@@ -50,10 +50,7 @@ async function generateGreeting() {
     },
     body: JSON.stringify({
       text: GREETING_TEXT,
-      model: 'aura-asteria-en', // you may choose other models
-      encoding: 'mulaw',
-      sample_rate: 8000,
-      container: 'wav'
+      model: 'aura-asteria-en' // Do NOT include encoding, sample_rate, or container!
     })
   });
 
@@ -72,6 +69,7 @@ async function generateGreeting() {
   await fs.writeFile(greetingFile, buffer);
   console.log("✅ Greeting TTS WAV generated.");
 }
+
 
 // Serve greeting WAV
 app.get('/tts-audio/greeting.wav', async (req, res) => {
