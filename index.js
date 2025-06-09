@@ -36,6 +36,18 @@ const GREETING_TEXT = "Hello, this is your AI assistant. How may I help you?";
 // Generate greeting file if not present
 const greetingFile = path.join(TTS_DIR, 'greeting.mp3');
 
+// Pre-buffer the greeting audio
+let greetingBuffer = null;
+
+async function loadGreetingBuffer() {
+  try {
+    greetingBuffer = await fs.readFile(greetingFile);
+    console.log('✅ Greeting audio pre-buffered');
+  } catch (error) {
+    console.error('❌ Failed to pre-buffer greeting:', error);
+  }
+}
+
 // Utility: file existence
 async function fileExists(f) {
   try { await fs.access(f); return true; } catch { return false; }
@@ -80,14 +92,17 @@ async function generateGreeting() {
   console.log("✅ Greeting TTS MP3 generated.");
 }
 
-
-// Serve the greeting audio
+// Serve the greeting audio with pre-buffered content
 app.get('/tts-audio/greeting.mp3', async (req, res) => {
   res.setHeader('Content-Type', 'audio/mpeg');
-  res.sendFile(greetingFile);
+  if (greetingBuffer) {
+    res.send(greetingBuffer);
+  } else {
+    res.sendFile(greetingFile);
+  }
 });
 
-// Plivo will fetch this XML to know what to play
+// Plivo XML handler with optimized response
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
   const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
@@ -96,7 +111,8 @@ app.all('/plivo-xml', (req, res) => {
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play loop="1">${playUrl}</Play>
+  <Wait length="0.2"/>
+  <Play callbackUrl="${BASE_URL}/play-status">${playUrl}</Play>
   <Stream 
     bidirectional="false"
     audioTrack="inbound"
@@ -106,6 +122,12 @@ app.all('/plivo-xml', (req, res) => {
   
   console.log('📝 Generated Plivo XML:', xml);
   res.type('text/xml').send(xml);
+});
+
+// Add play status endpoint
+app.post('/play-status', (req, res) => {
+  console.log('🎵 Play status:', req.body);
+  res.sendStatus(200);
 });
 
 // Call trigger endpoint
@@ -177,10 +199,12 @@ app.ws('/listen', (ws, req) => {
   });
 });
 
-// Start server
+// Start server & initialize
 const port = process.env.PORT || 3000;
-generateGreeting().then(() => {
-  server.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+generateGreeting()
+  .then(loadGreetingBuffer)
+  .then(() => {
+    server.listen(port, () => {
+      console.log(`Server running on port ${port}`);
+    });
   });
-});
