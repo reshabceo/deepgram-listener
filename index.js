@@ -49,14 +49,16 @@ async function fileExists(f) {
 // Pre-buffer the greeting audio
 let greetingBuffer = null;
 
-// Simplified TTS generation for Indian telephony
+// Simplified TTS generation with quality voice
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
   
-  // Basic parameters that work well with Indian telephony systems
+  // Optimized parameters for quality and speed
   const url = new URL('https://api.deepgram.com/v1/speak');
   url.searchParams.append('encoding', 'mp3');
   url.searchParams.append('model', 'aura-asteria-en');
+  url.searchParams.append('voice', 'asteria');
+  url.searchParams.append('speed', '1.2');  // Slightly faster for better responsiveness
 
   const resp = await fetch(url.toString(), {
     method: 'POST',
@@ -86,23 +88,18 @@ async function generateGreeting() {
   console.log("✅ Greeting TTS MP3 generated");
 }
 
-// Optimized audio serving with proper headers
+// Optimized audio serving
 app.get('/tts-audio/greeting.mp3', async (req, res) => {
-  // Set performance-oriented headers
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Cache-Control', 'public, max-age=31536000');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Accept-Ranges', 'bytes');
-
+  
   try {
-    // Use in-memory buffer if available
     if (greetingBuffer) {
       res.setHeader('Content-Length', greetingBuffer.length);
       res.send(greetingBuffer);
       return;
     }
-
-    // Load and cache if not in memory
     greetingBuffer = await fs.readFile(greetingFile);
     res.setHeader('Content-Length', greetingBuffer.length);
     res.send(greetingBuffer);
@@ -115,15 +112,16 @@ app.get('/tts-audio/greeting.mp3', async (req, res) => {
 // Track call states
 const callStates = new Map();
 
-// Simplified Plivo XML for Indian telephony
+// Optimized Plivo XML with Play
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
   console.log('📞 New call initiated:', callUUID);
   
-  // For Indian numbers, we need to keep it simple
+  const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
+  
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Speak>Hello, this is your AI assistant. How may I help you?</Speak>
+  <Play>${playUrl}</Play>
   <Stream 
     bidirectional="false"
     audioTrack="inbound"
