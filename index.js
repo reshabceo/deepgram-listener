@@ -49,24 +49,21 @@ async function fileExists(f) {
 // Pre-buffer the greeting audio
 let greetingBuffer = null;
 
-// Optimized TTS generation with balanced speed
+// Optimized TTS generation
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
   
-  // Optimized parameters for quality and latency
+  // Keep only the essential, supported parameters
   const url = new URL('https://api.deepgram.com/v1/speak');
   url.searchParams.append('encoding', 'mp3');
   url.searchParams.append('model', 'aura-asteria-en');
-  url.searchParams.append('voice', 'asteria');
-  url.searchParams.append('speed', '1.1');  // Balanced speed
-  url.searchParams.append('sample_rate', '16000');  // Reduced for faster transfer
+  url.searchParams.append('speed', '1.1');
 
   const resp = await fetch(url.toString(), {
     method: 'POST',
     headers: {
       'Authorization': `Token ${DEEPGRAM_API_KEY}`,
-      'Content-Type': 'application/json',
-      'Accept-Encoding': 'gzip, deflate'  // Enable compression
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify({
       text: GREETING_TEXT
@@ -87,16 +84,13 @@ async function generateGreeting() {
 
   greetingBuffer = buffer;
   await fs.writeFile(greetingFile, buffer);
-  console.log("✅ Greeting TTS MP3 generated, size:", buffer.length, "bytes");
+  console.log("✅ Greeting TTS MP3 generated");
 }
 
-// Optimized audio serving with compression
+// Optimized audio serving
 app.get('/tts-audio/greeting.mp3', async (req, res) => {
   res.setHeader('Content-Type', 'audio/mpeg');
   res.setHeader('Cache-Control', 'public, max-age=31536000');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Transfer-Encoding', 'chunked');
-  res.setHeader('Connection', 'keep-alive');
   
   try {
     if (greetingBuffer) {
@@ -116,16 +110,12 @@ app.get('/tts-audio/greeting.mp3', async (req, res) => {
 // Track call states
 const callStates = new Map();
 
-// Optimized Plivo XML with immediate play
+// Plivo XML handler
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
   console.log('📞 New call initiated:', callUUID);
   
   const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
-  
-  // Send headers for faster response
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -216,19 +206,16 @@ app.ws('/listen', (ws, req) => {
   });
 });
 
-// Initialize server with pre-warming
+// Initialize server
 const port = process.env.PORT || 3000;
 
 async function initServer() {
   try {
-    // Pre-generate and load greeting
     await generateGreeting();
     if (await fileExists(greetingFile)) {
       greetingBuffer = await fs.readFile(greetingFile);
-      console.log('✅ Greeting audio pre-loaded:', greetingBuffer.length, 'bytes');
+      console.log('✅ Greeting audio pre-loaded into memory');
     }
-    
-    // Start server
     server.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
