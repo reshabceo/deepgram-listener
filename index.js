@@ -32,7 +32,9 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const plivoClient = new plivo.Client(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN);
 
 const GREETING_TEXT = "Hello, this is your AI assistant. How may I help?";
-const greetingFile = path.join(TTS_DIR, 'greeting.wav');
+
+// Generate greeting file if not present
+const greetingFile = path.join(TTS_DIR, 'greeting.mp3');
 
 // Utility: file existence
 async function fileExists(f) {
@@ -42,7 +44,7 @@ async function fileExists(f) {
 // Utility: Generate TTS file (Deepgram to WAV)
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
-  const resp = await fetch('https://api.deepgram.com/v1/speak', {
+  const resp = await fetch('https://api.deepgram.com/v1/speak?encoding=mp3', {
     method: 'POST',
     headers: {
       'Authorization': `Token ${DEEPGRAM_API_KEY}`,
@@ -50,7 +52,7 @@ async function generateGreeting() {
     },
     body: JSON.stringify({
       text: GREETING_TEXT,
-      model: 'aura-asteria-en' // Do NOT include encoding, sample_rate, or container!
+      model: 'aura-asteria-en'
     })
   });
 
@@ -67,22 +69,23 @@ async function generateGreeting() {
   }
 
   await fs.writeFile(greetingFile, buffer);
-  console.log("✅ Greeting TTS WAV generated.");
+  console.log("✅ Greeting TTS MP3 generated.");
 }
 
 
-// Serve greeting WAV
-app.get('/tts-audio/greeting.wav', async (req, res) => {
-  res.setHeader('Content-Type', 'audio/wav');
+// Serve the greeting audio
+app.get('/tts-audio/greeting.mp3', async (req, res) => {
+  res.setHeader('Content-Type', 'audio/mpeg');
   res.sendFile(greetingFile);
 });
 
-// Plivo XML handler
+// Plivo will fetch this XML to know what to play
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
-  const playUrl = `${BASE_URL}/tts-audio/greeting.wav`;
+  const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
   const wsHost = BASE_URL.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
+  
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>${playUrl}</Play>
@@ -93,6 +96,7 @@ app.all('/plivo-xml', (req, res) => {
     statusCallbackUrl="${BASE_URL}/api/stream-status"
   >${wsUrl}</Stream>
 </Response>`;
+  
   console.log('📝 Generated Plivo XML:', xml);
   res.type('text/xml').send(xml);
 });
