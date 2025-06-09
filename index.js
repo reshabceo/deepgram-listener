@@ -45,18 +45,22 @@ async function fileExists(f) {
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
   
-  const resp = await fetch('https://api.deepgram.com/v1/speak?encoding=mp3', {
+  // Move parameters to URL query string
+  const url = new URL('https://api.deepgram.com/v1/speak');
+  url.searchParams.append('encoding', 'mp3');
+  url.searchParams.append('model', 'aura-asteria-en');
+  url.searchParams.append('voice', 'asteria');
+  url.searchParams.append('rate', '0.9');
+  url.searchParams.append('pitch', '1.1');
+
+  const resp = await fetch(url.toString(), {
     method: 'POST',
     headers: {
       'Authorization': `Token ${DEEPGRAM_API_KEY}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text: GREETING_TEXT,
-      model: 'aura-asteria-en',
-      voice: 'asteria',
-      rate: 0.9,
-      pitch: 1.1
+      text: GREETING_TEXT  // Only text in the body
     })
   });
 
