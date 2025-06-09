@@ -1,107 +1,81 @@
-// index.js
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import http from 'http';
-import expressWs from 'express-ws';
-import plivo from 'plivo';
-import { createClient as createDG } from '@deepgram/sdk';
+import { WebSocketServer } from 'ws';
+import { createClient } from '@deepgram/sdk';
 
-const {
-  PLIVO_AUTH_ID,
-  PLIVO_AUTH_TOKEN,
-  PLIVO_FROM_NUMBER,
-  PLIVO_TO_NUMBER,
-  BASE_URL,
-  DEEPGRAM_API_KEY
-} = process.env;
-
-// — initialize Plivo & Express+WebSocket —
-const plivoClient = new plivo.Client(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN);
+const DG = createClient(process.env.DEEPGRAM_API_KEY);
 const app = express();
 const server = http.createServer(app);
-expressWs(app, server);
+const PORT = process.env.PORT || 8080;
 
-app.use(express.json());
-
-// — 1) Trigger a call via Plivo —
-app.post('/api/call', async (req, res) => {
-  try {
-    const resp = await plivoClient.calls.create(
-      PLIVO_FROM_NUMBER,
-      PLIVO_TO_NUMBER,
-      `${BASE_URL}/plivo-xml`,
-      { answerMethod: 'GET' }
-    );
-    res.json({ ok: true, resp });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// — 2) Plivo fetches this first: play greeting, then stream inbound —
-app.all('/plivo-xml', (req, res) => {
-  const callUUID = req.query.CallUUID || `call_${Date.now()}`;
-  console.log('📞 New call:', callUUID);
-
-  const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;  // if you still want a pre-buffered MP3
-  // Or you could inline your WebSocket TTS right here…
-
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+// 1) HTTP endpoint for Plivo to fetch your call-control XML
+app.get('/answer', (_req, res) => {
+  // This XML tells Plivo to first open a TTS stream, then an STT stream.
+  res.type('application/xml').send(`
 <Response>
-  <Play>${playUrl}</Play>
-  <Stream
-    bidirectional="false"
-    audioTrack="inbound"
-    contentType="audio/x-mulaw;rate=8000"
-    statusCallbackUrl="${BASE_URL}/api/stream-status"
-  >wss://${BASE_URL.replace(/^https?:\/\//, '')}/listen?call_uuid=${callUUID}</Stream>
-</Response>`;
-  res.type('text/xml').send(xml);
+  <!-- outbound = send us "media" events over /tts -->
+  <Stream url="wss://${process.env.RAILWAY_STATIC_URL}/tts" track="outbound"/>
+  <!-- inbound = Plivo will send caller audio as base64 over /listen -->
+  <Stream url="wss://${process.env.RAILWAY_STATIC_URL}/listen" track="inbound"/>
+</Response>
+  `.trim());
 });
 
-// — 3) Receive stream status callbacks if you care —
-app.post('/api/stream-status', (req, res) => {
-  console.log('🎵 Stream status:', req.body);
-  res.sendStatus(200);
-});
+// 2) WebSocket server for both TTS and STT, routed by path
+const wss = new WebSocketServer({ noServer: true });
 
-// — 4) Handle the incoming Plivo WebSocket at /listen —
-app.ws('/listen', (ws, req) => {
-  const callId = req.query.call_uuid;
-  console.log('🔗 WebSocket connected for call:', callId);
-
-  // When Plivo sends us caller’s audio:
-  ws.on('message', (msg) => {
-    const data = JSON.parse(msg.toString());
-    if (data.event === 'media') {
-      // Here you’d forward to Deepgram STT, etc.
-      console.log('🎤 got inbound chunk for STT');
+wss.on('connection', async (socket, req) => {
+  if (req.url === '/tts') {
+    console.log('🔊 Plivo connected for TTS');
+    // Kick off a Deepgram streaming-TTS request for your greeting
+    const resp = await DG.speak.request(
+      { text: 'Hello! Please say something after the beep.' },
+      { model: 'aura-2-thalia-en', streaming: true, encoding: 'mulaw', sample_rate: 8000, voice: 'asteria' }
+    );
+    const stream = await resp.getStream();
+    for await (const chunk of stream) {
+      // wrap each mulaw buffer in Plivo’s expected JSON:
+      socket.send(JSON.stringify({
+        event: 'media',
+        media: { payload: Buffer.from(chunk).toString('base64') }
+      }));
     }
-  });
+    socket.close();
+    console.log('✅ TTS stream complete');
+  }
 
-  ws.on('close', () => console.log('❌ WS closed for call:', callId));
-  ws.on('error', (err) => console.error('💥 WS error:', err));
+  else if (req.url === '/listen') {
+    console.log('🎙️ Plivo connected for STT');
+    socket.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.channel?.alternatives?.[0]?.transcript) {
+          console.log('📝 Transcript:', msg.channel.alternatives[0].transcript);
+        }
+      } catch (e) {
+        console.error('STT parse error:', e);
+      }
+    });
+    socket.on('close', () => console.log('❌ STT connection closed'));
+  }
+
+  else {
+    socket.destroy();
+  }
 });
 
-// — 5) Helper to stream Deepgram TTS back into Plivo WS —
-async function sendTTS(plivoWs, text) {
-  const dg = createDG(DEEPGRAM_API_KEY);
-  const response = await dg.speak.request(
-    { text },
-    { model: 'aura-2-thalia-en', streaming: true }
-  );
-  const stream = await response.getStream();
-  for await (const chunk of stream) {
-    plivoWs.send(JSON.stringify({
-      event: 'media',
-      media: { payload: Buffer.from(chunk).toString('base64') }
-    }));
-    // you can throttle here if needed
-  }
-}
+// route HTTP→WebSocket upgrade events
+server.on('upgrade', (req, sock, head) => {
+  wss.handleUpgrade(req, sock, head, (socket) => {
+    wss.emit('connection', socket, req);
+  });
+});
 
-// — 6) Launch server —
-const port = process.env.PORT || 8080;
-server.listen(port, () => {
-  console.log(`✅ Server listening on http://0.0.0.0:${port}/`);
+server.listen(PORT, () => {
+  console.log(`✅ Server listening on http://0.0.0.0:${PORT}/`);
+  console.log(`   • STT WS at ws://<host>:${PORT}/listen`);
+  console.log(`   • TTS WS at ws://<host>:${PORT}/tts`);
 });
