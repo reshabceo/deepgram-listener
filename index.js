@@ -105,52 +105,28 @@ app.get('/tts-audio/greeting.mp3', async (req, res) => {
 // Track call states
 const callStates = new Map();
 
-// Plivo XML handler - Initial greeting
+// Plivo XML handler - Single response with Play and Stream
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
   console.log('📞 New call initiated:', callUUID);
   
   const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
+  const wsHost = BASE_URL.replace(/^https?:\/\//, '');
+  const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play callbackUrl="${BASE_URL}/play-status">${playUrl}</Play>
-</Response>`;
-  
-  console.log('📝 Generated initial XML for greeting');
-  res.type('text/xml').send(xml);
-});
-
-// Play status handler - Transition to streaming after greeting
-app.post('/play-status', (req, res) => {
-  const callUUID = req.body.CallUUID;
-  const status = req.body.Status;
-  console.log('🎵 Play status:', status, 'for call:', callUUID);
-
-  if (status === 'completed') {
-    const wsHost = BASE_URL.replace(/^https?:\/\//, '');
-    const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-    
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Stream 
+  <Play>${playUrl}</Play>
+  <Stream
     bidirectional="false"
     audioTrack="inbound"
     contentType="audio/x-mulaw;rate=8000"
-    statusCallbackUrl="${BASE_URL}/api/stream-status">${wsUrl}</Stream>
+    statusCallbackUrl="${BASE_URL}/api/stream-status"
+  >${wsUrl}</Stream>
 </Response>`;
-    
-    console.log('📝 Generated streaming XML after greeting');
-    res.type('text/xml').send(xml);
-  } else {
-    // If play failed or was stopped, try to recover
-    console.log('⚠️ Play did not complete:', status);
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Speak>Sorry, there was an issue. Please try again.</Speak>
-  <Hangup/></Response>`;
-    res.type('text/xml').send(xml);
-  }
+  
+  console.log('📝 Generated Plivo XML:', xml);
+  res.type('text/xml').send(xml);
 });
 
 // Stream status endpoint with enhanced logging
