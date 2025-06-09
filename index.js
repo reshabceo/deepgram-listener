@@ -102,45 +102,65 @@ app.get('/tts-audio/greeting.mp3', async (req, res) => {
   }
 });
 
-// Plivo XML handler with optimized response
+// Track call states
+const callStates = new Map();
+
+// Plivo XML handler - Initial greeting
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
+  console.log('📞 New call initiated:', callUUID);
+  
   const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
-  const wsHost = BASE_URL.replace(/^https?:\/\//, '');
-  const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play loop="1" length="5">${playUrl}</Play>
-  <GetDigits timeout="10" numDigits="1" retries="1">
-    <Stream 
-      bidirectional="false"
-      audioTrack="inbound"
-      contentType="audio/x-mulaw;rate=8000"
-      statusCallbackUrl="${BASE_URL}/api/stream-status">${wsUrl}</Stream>
-  </GetDigits>
+  <Play callbackUrl="${BASE_URL}/play-status">${playUrl}</Play>
 </Response>`;
   
-  console.log('📝 Generated Plivo XML:', xml);
+  console.log('📝 Generated initial XML for greeting');
   res.type('text/xml').send(xml);
 });
 
-// Add digit handler endpoint
-app.post('/digit-handler', (req, res) => {
-  console.log('📱 Digit received:', req.body);
-  res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+// Play status handler - Transition to streaming after greeting
+app.post('/play-status', (req, res) => {
+  const callUUID = req.body.CallUUID;
+  const status = req.body.Status;
+  console.log('🎵 Play status:', status, 'for call:', callUUID);
+
+  if (status === 'completed') {
+    const wsHost = BASE_URL.replace(/^https?:\/\//, '');
+    const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
+    
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Stream 
     bidirectional="false"
     audioTrack="inbound"
     contentType="audio/x-mulaw;rate=8000"
-    statusCallbackUrl="${BASE_URL}/api/stream-status">wss://${req.hostname}/listen?call_uuid=${req.body.CallUUID}</Stream>
-</Response>`);
+    statusCallbackUrl="${BASE_URL}/api/stream-status">${wsUrl}</Stream>
+</Response>`;
+    
+    console.log('📝 Generated streaming XML after greeting');
+    res.type('text/xml').send(xml);
+  } else {
+    // If play failed or was stopped, try to recover
+    console.log('⚠️ Play did not complete:', status);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Speak>Sorry, there was an issue. Please try again.</Speak>
+  <Hangup/></Response>`;
+    res.type('text/xml').send(xml);
+  }
 });
 
-// Stream status endpoint
+// Stream status endpoint with enhanced logging
 app.post('/api/stream-status', (req, res) => {
-  console.log('📊 Stream status:', req.body);
+  const status = req.body;
+  console.log('📊 Stream status update:', {
+    callUUID: status.CallUUID,
+    status: status.Status,
+    timestamp: new Date().toISOString()
+  });
   res.sendStatus(200);
 });
 
@@ -159,20 +179,20 @@ app.post('/api/call', async (req, res) => {
   }
 });
 
-// WebSocket for future use (not used for greeting step, but included)
+// Enhanced WebSocket handling
 app.ws('/listen', (ws, req) => {
   const callId = req.query.call_uuid;
   if (!callId) {
-    console.log('❌ No call UUID provided');
+    console.log('❌ No call UUID provided for WebSocket');
     return ws.close();
   }
   
-  console.log('📞 WebSocket connected for call:', callId);
+  console.log('🔌 WebSocket connected for call:', callId);
   let isAlive = true;
   
   const keepAlive = setInterval(() => {
     if (!isAlive) {
-      console.log('❌ Connection dead for call:', callId);
+      console.log('💔 Connection dead for call:', callId);
       clearInterval(keepAlive);
       return ws.terminate();
     }
@@ -182,6 +202,7 @@ app.ws('/listen', (ws, req) => {
   
   ws.on('pong', () => {
     isAlive = true;
+    console.log('💓 Connection alive for call:', callId);
   });
   
   ws.on('message', async (msg) => {
@@ -189,7 +210,6 @@ app.ws('/listen', (ws, req) => {
       const data = JSON.parse(msg);
       if (data.event === 'media' && data.media?.payload) {
         console.log('🎤 Received audio data for call:', callId);
-        // Add your audio processing logic here
       }
     } catch (e) {
       console.error('❌ Error processing WebSocket message:', e);
@@ -197,12 +217,12 @@ app.ws('/listen', (ws, req) => {
   });
   
   ws.on('close', () => {
-    console.log('📞 WebSocket closed for call:', callId);
+    console.log('👋 WebSocket closed for call:', callId);
     clearInterval(keepAlive);
   });
 
   ws.on('error', (error) => {
-    console.error('❌ WebSocket error for call:', callId, error);
+    console.error('💥 WebSocket error for call:', callId, error);
     clearInterval(keepAlive);
   });
 });
