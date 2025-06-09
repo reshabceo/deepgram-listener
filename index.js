@@ -46,14 +46,30 @@ async function generateGreeting() {
     },
     body: JSON.stringify({
       text: GREETING_TEXT,
-      model: 'aura-asteria-en',
-      container: 'mp3'
+      model: 'aura-asteria-en',    // Or use another available model for TTS
+      encoding: 'mulaw',
+      sample_rate: 8000,
+      container: 'wav'
     })
   });
+
+  // *** ADD ERROR CHECKING HERE ***
+  if (!resp.ok) {
+    const errorText = await resp.text();
+    console.error("❌ Deepgram TTS error:", resp.status, errorText);
+    throw new Error("Deepgram TTS failed: " + errorText);
+  }
+
   const buffer = Buffer.from(await resp.arrayBuffer());
+  if (buffer.length < 1000) {
+    console.error("❌ TTS audio is too short! Response likely not audio.");
+    throw new Error("Deepgram did not return valid audio. Check your API key, balance, and model.");
+  }
+
   await fs.writeFile(greetingFile, buffer);
-  console.log("✅ Greeting TTS MP3 generated.");
+  console.log("✅ Greeting TTS WAV generated.");
 }
+
 
 async function fileExists(f) {
   try { await fs.access(f); return true; } catch { return false; }
