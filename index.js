@@ -36,20 +36,27 @@ const GREETING_TEXT = "Hello, this is your AI assistant. How may I help you?";
 // Generate greeting file if not present
 const greetingFile = path.join(TTS_DIR, 'greeting.mp3');
 
+// Utility functions
+async function fileExists(f) {
+  try { 
+    await fs.access(f); 
+    return true; 
+  } catch { 
+    return false; 
+  }
+}
+
 // Pre-buffer the greeting audio
 let greetingBuffer = null;
 
-// Optimize TTS settings for faster delivery
+// Simplified TTS generation for Indian telephony
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
   
-  // Optimize URL parameters for smaller, faster audio
+  // Basic parameters that work well with Indian telephony systems
   const url = new URL('https://api.deepgram.com/v1/speak');
   url.searchParams.append('encoding', 'mp3');
   url.searchParams.append('model', 'aura-asteria-en');
-  url.searchParams.append('speed', '1.1');  // Slightly faster
-  url.searchParams.append('quality', 'low'); // Lower quality for faster transfer
-  url.searchParams.append('sample_rate', '8000'); // Lower sample rate
 
   const resp = await fetch(url.toString(), {
     method: 'POST',
@@ -74,10 +81,9 @@ async function generateGreeting() {
     throw new Error("Invalid audio generated");
   }
 
-  // Store in memory and file
   greetingBuffer = buffer;
   await fs.writeFile(greetingFile, buffer);
-  console.log("✅ Greeting TTS MP3 generated and cached");
+  console.log("✅ Greeting TTS MP3 generated");
 }
 
 // Optimized audio serving with proper headers
@@ -109,28 +115,21 @@ app.get('/tts-audio/greeting.mp3', async (req, res) => {
 // Track call states
 const callStates = new Map();
 
-// Plivo XML handler with optimized response
+// Simplified Plivo XML for Indian telephony
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
   console.log('📞 New call initiated:', callUUID);
   
-  const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
-  const wsHost = BASE_URL.replace(/^https?:\/\//, '');
-  const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
-  
-  // Set response headers for faster delivery
-  res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  
+  // For Indian numbers, we need to keep it simple
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${playUrl}</Play>
-  <Stream
+  <Speak>Hello, this is your AI assistant. How may I help you?</Speak>
+  <Stream 
     bidirectional="false"
     audioTrack="inbound"
     contentType="audio/x-mulaw;rate=8000"
     statusCallbackUrl="${BASE_URL}/api/stream-status"
-  >${wsUrl}</Stream>
+  >wss://${BASE_URL.replace(/^https?:\/\//, '')}/listen?call_uuid=${callUUID}</Stream>
 </Response>`;
   
   console.log('📝 Generated Plivo XML');
