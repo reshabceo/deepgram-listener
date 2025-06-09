@@ -34,7 +34,7 @@ const plivoClient = new plivo.Client(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN);
 const GREETING_TEXT = "Hello, this is your AI assistant. How may I help?";
 
 // Generate greeting file if not present
-const greetingFile = path.join(TTS_DIR, 'greeting.wav');
+const greetingFile = path.join(TTS_DIR, 'greeting.mp3');
 
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
@@ -47,14 +47,12 @@ async function generateGreeting() {
     body: JSON.stringify({
       text: GREETING_TEXT,
       model: 'aura-asteria-en',
-      encoding: 'mulaw',
-      sample_rate: 8000,
-      container: 'wav'
+      container: 'mp3'
     })
   });
   const buffer = Buffer.from(await resp.arrayBuffer());
   await fs.writeFile(greetingFile, buffer);
-  console.log("✅ Greeting TTS generated.");
+  console.log("✅ Greeting TTS MP3 generated.");
 }
 
 async function fileExists(f) {
@@ -98,15 +96,15 @@ app.ws('/listen', (ws, req) => {
 });
 
 // Serve the greeting audio
-app.get('/tts-audio/greeting.wav', async (req, res) => {
-  res.setHeader('Content-Type', 'audio/wav');
+app.get('/tts-audio/greeting.mp3', async (req, res) => {
+  res.setHeader('Content-Type', 'audio/mpeg');
   res.sendFile(greetingFile);
 });
 
 // Plivo will fetch this XML to know what to play
 app.all('/plivo-xml', (req, res) => {
   const callUUID = req.query.CallUUID || 'call_' + Date.now();
-  const playUrl = `${BASE_URL}/tts-audio/greeting.wav`;
+  const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;
   const wsHost = BASE_URL.replace(/^https?:\/\//, '');
   const wsUrl = `wss://${wsHost}/listen?call_uuid=${callUUID}`;
   
