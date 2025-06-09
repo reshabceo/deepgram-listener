@@ -31,7 +31,7 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
 const plivoClient = new plivo.Client(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN);
 
-const GREETING_TEXT = "Hello, this is your AI assistant. How may I help?";
+const GREETING_TEXT = "Hello, this is your AI assistant. How may I help you?";
 
 // Generate greeting file if not present
 const greetingFile = path.join(TTS_DIR, 'greeting.mp3');
@@ -45,7 +45,6 @@ async function fileExists(f) {
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
   
-  // First try with minimal payload
   const resp = await fetch('https://api.deepgram.com/v1/speak?encoding=mp3', {
     method: 'POST',
     headers: {
@@ -53,7 +52,11 @@ async function generateGreeting() {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text: GREETING_TEXT  // Only sending the required text field
+      text: GREETING_TEXT,
+      model: 'aura-asteria-en',
+      voice: 'asteria',
+      rate: 0.9,
+      pitch: 1.1
     })
   });
 
@@ -89,13 +92,12 @@ app.all('/plivo-xml', (req, res) => {
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>${playUrl}</Play>
-  <Stream
+  <Play loop="1">${playUrl}</Play>
+  <Stream 
     bidirectional="false"
     audioTrack="inbound"
     contentType="audio/x-mulaw;rate=8000"
-    statusCallbackUrl="${BASE_URL}/api/stream-status"
-  >${wsUrl}</Stream>
+    statusCallbackUrl="${BASE_URL}/api/stream-status">${wsUrl}</Stream>
 </Response>`;
   
   console.log('📝 Generated Plivo XML:', xml);
@@ -130,18 +132,44 @@ app.ws('/listen', (ws, req) => {
     console.log('❌ No call UUID provided');
     return ws.close();
   }
+  
   console.log('📞 WebSocket connected for call:', callId);
-  // Keep connection alive
+  let isAlive = true;
+  
   const keepAlive = setInterval(() => {
-    if (ws.readyState === ws.OPEN) ws.ping();
-  }, 30000);
+    if (!isAlive) {
+      console.log('❌ Connection dead for call:', callId);
+      clearInterval(keepAlive);
+      return ws.terminate();
+    }
+    isAlive = false;
+    ws.ping();
+  }, 15000);
+  
+  ws.on('pong', () => {
+    isAlive = true;
+  });
+  
+  ws.on('message', async (msg) => {
+    try {
+      const data = JSON.parse(msg);
+      if (data.event === 'media' && data.media?.payload) {
+        console.log('🎤 Received audio data for call:', callId);
+        // Add your audio processing logic here
+      }
+    } catch (e) {
+      console.error('❌ Error processing WebSocket message:', e);
+    }
+  });
+  
   ws.on('close', () => {
     console.log('📞 WebSocket closed for call:', callId);
     clearInterval(keepAlive);
   });
-  ws.on('message', (msg) => {
-    // For step 1, we don't process audio yet
-    // console.log("WS MSG:", msg);
+
+  ws.on('error', (error) => {
+    console.error('❌ WebSocket error for call:', callId, error);
+    clearInterval(keepAlive);
   });
 });
 
