@@ -111,22 +111,36 @@ app.all('/plivo-xml', (req, res) => {
   
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Wait length="0.2"/>
-  <Play callbackUrl="${BASE_URL}/play-status">${playUrl}</Play>
-  <Stream 
-    bidirectional="false"
-    audioTrack="inbound"
-    contentType="audio/x-mulaw;rate=8000"
-    statusCallbackUrl="${BASE_URL}/api/stream-status">${wsUrl}</Stream>
+  <Play loop="1" length="5">${playUrl}</Play>
+  <GetDigits timeout="10" numDigits="1" retries="1">
+    <Stream 
+      bidirectional="false"
+      audioTrack="inbound"
+      contentType="audio/x-mulaw;rate=8000"
+      statusCallbackUrl="${BASE_URL}/api/stream-status">${wsUrl}</Stream>
+  </GetDigits>
 </Response>`;
   
   console.log('📝 Generated Plivo XML:', xml);
   res.type('text/xml').send(xml);
 });
 
-// Add play status endpoint
-app.post('/play-status', (req, res) => {
-  console.log('🎵 Play status:', req.body);
+// Add digit handler endpoint
+app.post('/digit-handler', (req, res) => {
+  console.log('📱 Digit received:', req.body);
+  res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream 
+    bidirectional="false"
+    audioTrack="inbound"
+    contentType="audio/x-mulaw;rate=8000"
+    statusCallbackUrl="${BASE_URL}/api/stream-status">wss://${req.hostname}/listen?call_uuid=${req.body.CallUUID}</Stream>
+</Response>`);
+});
+
+// Stream status endpoint
+app.post('/api/stream-status', (req, res) => {
+  console.log('📊 Stream status:', req.body);
   res.sendStatus(200);
 });
 
@@ -143,12 +157,6 @@ app.post('/api/call', async (req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
-});
-
-// Stream status
-app.post('/api/stream-status', (req, res) => {
-  console.log('📊 Stream status:', req.body);
-  res.sendStatus(200);
 });
 
 // WebSocket for future use (not used for greeting step, but included)
