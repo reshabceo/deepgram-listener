@@ -44,6 +44,8 @@ async function fileExists(f) {
 // Utility: Generate TTS file (Deepgram to WAV)
 async function generateGreeting() {
   if (await fileExists(greetingFile)) return;
+  
+  // First try with minimal payload
   const resp = await fetch('https://api.deepgram.com/v1/speak?encoding=mp3', {
     method: 'POST',
     headers: {
@@ -51,8 +53,7 @@ async function generateGreeting() {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      text: GREETING_TEXT,
-      model: 'aura-asteria-en'
+      text: GREETING_TEXT  // Only sending the required text field
     })
   });
 
