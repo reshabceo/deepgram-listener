@@ -1,89 +1,29 @@
+// index.js
 import 'dotenv/config';
 import express from 'express';
-import expressWs from 'express-ws';
 import http from 'http';
-import path from 'path';
-import fs from 'fs/promises';
-import { createClient as createDeepgramClient } from '@deepgram/sdk';
+import expressWs from 'express-ws';
 import plivo from 'plivo';
-import fetch from 'node-fetch';
+import { createClient as createDG } from '@deepgram/sdk';
 
-// --- Configuration & Setup --------------------------------
 const {
   PLIVO_AUTH_ID,
   PLIVO_AUTH_TOKEN,
   PLIVO_FROM_NUMBER,
   PLIVO_TO_NUMBER,
   BASE_URL,
-  DEEPGRAM_API_KEY,
-  OPENAI_API_KEY,
-  PORT = 3000,
+  DEEPGRAM_API_KEY
 } = process.env;
 
-if (!PLIVO_AUTH_ID || !PLIVO_AUTH_TOKEN || !DEEPGRAM_API_KEY || !OPENAI_API_KEY || !BASE_URL) {
-  console.error('❌ Missing one of required env vars: PLIVO_*, DEEPGRAM_API_KEY, OPENAI_API_KEY, BASE_URL');
-  process.exit(1);
-}
-
-// HTTP + WebSocket server
+// — initialize Plivo & Express+WebSocket —
+const plivoClient = new plivo.Client(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN);
 const app = express();
 const server = http.createServer(app);
 expressWs(app, server);
+
 app.use(express.json());
 
-// Public TTS directory
-const TTS_DIR = path.resolve('public', 'tts');
-await fs.mkdir(TTS_DIR, { recursive: true });
-app.use('/tts', express.static(path.resolve('public', 'tts')));
-
-// Deepgram & Plivo clients
-const dg = createDeepgramClient(DEEPGRAM_API_KEY);
-const plivoClient = new plivo.Client(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN);
-
-// --- 1) Pre-generate & cache greeting ----------------------
-const GREETING_TEXT = 'Hello, this is your AI assistant. How may I help you today?';
-const GREETING_FILE = path.join(TTS_DIR, 'greeting.wav');
-async function generateGreeting() {
-  try {
-    await fs.access(GREETING_FILE);
-    console.log('✅ Greeting already cached');
-  } catch {
-    console.log('🔊 Generating greeting via Deepgram WS TTS...');
-    const response = await dg.speak.request(
-      { text: GREETING_TEXT },
-      { model: 'aura-2-thalia-en', streaming: true }
-    );
-    const stream = await response.getStream();
-    const chunks = [];
-    for await (const c of stream) chunks.push(c);
-    await fs.writeFile(GREETING_FILE, Buffer.concat(chunks));
-    console.log('✅ Greeting saved to', GREETING_FILE);
-  }
-}
-generateGreeting();
-
-// --- 2) Plivo XML: play greeting, then switch to inbound stream ---
-app.all('/plivo-xml', (req, res) => {
-  const callUUID = req.query.CallUUID;
-  const playUrl = `${BASE_URL}/tts/greeting.wav`;
-  const wsUrl = `${BASE_URL.replace(/^https?:\/\//, 'wss://')}/listen?call_uuid=${callUUID}`;
-  const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${playUrl}</Play>
-  <Stream bidirectional="false" audioTrack="inbound" contentType="audio/x-mulaw;rate=8000" statusCallbackUrl="${BASE_URL}/api/stream-status">
-    ${wsUrl}
-  </Stream>
-</Response>`;
-  res.type('text/xml').send(xml);
-});
-
-// --- 3) Stream-status logging --------------------------------
-app.post('/api/stream-status', express.urlencoded({ extended: true }), (req, res) => {
-  console.log('📊 Stream status:', req.body);
-  res.sendStatus(200);
-});
-
-// --- 4) Initiate outbound call --------------------------------
+// — 1) Trigger a call via Plivo —
 app.post('/api/call', async (req, res) => {
   try {
     const resp = await plivoClient.calls.create(
@@ -93,76 +33,75 @@ app.post('/api/call', async (req, res) => {
       { answerMethod: 'GET' }
     );
     res.json({ ok: true, resp });
-  } catch (err) {
-    console.error('❌ Call failed:', err);
-    res.status(500).json({ ok: false, error: err.message });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// --- 5) Listen WS: receive user audio → STT → AI → TTS reply ---
-app.ws('/listen', async (ws, req) => {
-  const callId = req.query.call_uuid;
-  console.log('🔌 WebSocket /listen open for call:', callId);
+// — 2) Plivo fetches this first: play greeting, then stream inbound —
+app.all('/plivo-xml', (req, res) => {
+  const callUUID = req.query.CallUUID || `call_${Date.now()}`;
+  console.log('📞 New call:', callUUID);
 
-  // Start Deepgram live STT
-  const sttConn = dg.transcription.live({
-    model: 'nova-2', language: 'en-US', encoding: 'mulaw', sample_rate: 8000
-  });
-  sttConn.open();
+  const playUrl = `${BASE_URL}/tts-audio/greeting.mp3`;  // if you still want a pre-buffered MP3
+  // Or you could inline your WebSocket TTS right here…
 
-  sttConn.on('transcript', async data => {
-    if (!data.is_final) return;
-    const userText = data.channel.alternatives[0].transcript;
-    console.log('📝 User said:', userText);
-
-    // 1. Send to OpenAI
-    const aiText = await generateAIResponse(userText);
-    console.log('🤖 AI will reply:', aiText);
-
-    // 2. Stream TTS reply back to caller via Deepgram WS
-    const response = await dg.speak.request(
-      { text: aiText },
-      { model: 'aura-2-thalia-en', streaming: true }
-    );
-    const stream = await response.getStream();
-    const chunks = [];
-    for await (const c of stream) chunks.push(c);
-
-    // 3. Save reply file and point Plivo at it
-    const filename = `${callId}-${Date.now()}.wav`;
-    const filepath = path.join(TTS_DIR, filename);
-    await fs.writeFile(filepath, Buffer.concat(chunks));
-    await plivoClient.calls.update(callId, {
-      answerUrl: `${BASE_URL}/tts/${filename}`,
-      answerMethod: 'GET'
-    });
-  });
-
-  sttConn.on('error', e => console.error('🔴 STT error:', e));
-  sttConn.on('close', () => console.log('🔴 STT closed'));
-
-  ws.on('message', msg => {
-    const data = JSON.parse(msg.toString());
-    if (data.event === 'media' && data.media.payload) {
-      sttConn.send(Buffer.from(data.media.payload, 'base64'));
-    }
-  });
-  ws.on('close', () => { sttConn.finish(); console.log('🔌 /listen closed'); });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>${playUrl}</Play>
+  <Stream
+    bidirectional="false"
+    audioTrack="inbound"
+    contentType="audio/x-mulaw;rate=8000"
+    statusCallbackUrl="${BASE_URL}/api/stream-status"
+  >wss://${BASE_URL.replace(/^https?:\/\//, '')}/listen?call_uuid=${callUUID}</Stream>
+</Response>`;
+  res.type('text/xml').send(xml);
 });
 
-// --- 6) OpenAI helper ----------------------------------------
-async function generateAIResponse(text) {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${OPENAI_API_KEY}`
-    },
-    body: JSON.stringify({ model: 'gpt-3.5-turbo', messages: [{ role: 'user', content: text }] })
+// — 3) Receive stream status callbacks if you care —
+app.post('/api/stream-status', (req, res) => {
+  console.log('🎵 Stream status:', req.body);
+  res.sendStatus(200);
+});
+
+// — 4) Handle the incoming Plivo WebSocket at /listen —
+app.ws('/listen', (ws, req) => {
+  const callId = req.query.call_uuid;
+  console.log('🔗 WebSocket connected for call:', callId);
+
+  // When Plivo sends us caller’s audio:
+  ws.on('message', (msg) => {
+    const data = JSON.parse(msg.toString());
+    if (data.event === 'media') {
+      // Here you’d forward to Deepgram STT, etc.
+      console.log('🎤 got inbound chunk for STT');
+    }
   });
-  const js = await res.json();
-  return js.choices[0].message.content;
+
+  ws.on('close', () => console.log('❌ WS closed for call:', callId));
+  ws.on('error', (err) => console.error('💥 WS error:', err));
+});
+
+// — 5) Helper to stream Deepgram TTS back into Plivo WS —
+async function sendTTS(plivoWs, text) {
+  const dg = createDG(DEEPGRAM_API_KEY);
+  const response = await dg.speak.request(
+    { text },
+    { model: 'aura-2-thalia-en', streaming: true }
+  );
+  const stream = await response.getStream();
+  for await (const chunk of stream) {
+    plivoWs.send(JSON.stringify({
+      event: 'media',
+      media: { payload: Buffer.from(chunk).toString('base64') }
+    }));
+    // you can throttle here if needed
+  }
 }
 
-// --- Start server -------------------------------------------
-server.listen(PORT, () => console.log(`🚀 Server listening on port ${PORT}`));
+// — 6) Launch server —
+const port = process.env.PORT || 8080;
+server.listen(port, () => {
+  console.log(`✅ Server listening on http://0.0.0.0:${port}/`);
+});
